@@ -321,10 +321,23 @@ static void scene_tick(App *app, float dt)
         if (ctx_due) {
             session_track_ctx(s);
             // Сжатие контекста снаружи неотличимо от работы — реестр
-            // пишет «busy». Зато на экране вкладки в это время строка
-            // «Compacting conversation»; ищем её, пока агент занят.
-            s->compacting = s->state == SESSION_STATE_BUSY
-                         && term_screen_has(&s->term, "Compacting conversation");
+            // пишет «busy». Зато крутилка Claude Code в это время пишет
+            // «Compacting conversation», а перед и после — хуки сжатия.
+            // Смотрим только на строку крутилки: та же фраза в тексте
+            // ответа (в разговоре про берт она встречается) не считается.
+            // Между сообщениями крутилки строка на миг пропадает, поэтому
+            // признак держится пару секунд после последнего появления —
+            // иначе на этом миге начинался бой и тут же «побеждал».
+            static const char *const compact_msgs[] = {
+                "Compacting conversation", "Running PreCompact hooks",
+                "Running PostCompact hooks", "Running SessionStart hooks",
+            };
+            bool seen = false;
+            if (s->state == SESSION_STATE_BUSY)
+                for (size_t k = 0; k < sizeof(compact_msgs) / sizeof(*compact_msgs) && !seen; k++)
+                    seen = term_screen_status(&s->term, compact_msgs[k]);
+            if (seen) s->compact_seen = now;
+            s->compacting = s->state == SESSION_STATE_BUSY && s->compact_seen > 0 && now - s->compact_seen < 2.0;
         }
         unsigned long seen = s->term.bytes_in;
         scene_activity(&s->scene, seen - s->scene_bytes_seen, dt);

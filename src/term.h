@@ -118,6 +118,10 @@ void term_update_render_state(Term *t);
 // работы: снаружи Claude Code и там и там «busy», а на экране пишет
 // «Compacting conversation».
 bool term_screen_has(Term *t, const char *needle);
+// То же, но строка должна быть именно строкой крутилки Claude Code:
+// «<глиф> <msg>…» и ничего больше. Поиск по всему экрану ловил фразу в
+// тексте ответа агента и включал «сжатие» посреди обычной работы.
+bool term_screen_status(Term *t, const char *msg);
 
 // true, если сессия ещё жива.
 static inline bool term_alive(const Term *t) { return !t->child_exited; }

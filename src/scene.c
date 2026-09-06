@@ -230,11 +230,10 @@ void scene_set(Scene *sc, SceneMood mood)
     case SCENE_COMPACT:
         // Уборка: герой ходит взад-вперёд, противник, если он здесь, ждёт в
         // стойке. Не бой — поток вывода в это время не про работу.
+        // Вбегающего не трогаем: он добежит сам (ENEMY_ENTER в update) —
+        // иначе он замирал в стойке за краем ячейки, и бой шёл «без него».
         if (hero_ready(sc)) hero_act(sc);
-        if (sc->enemy_phase == ENEMY_ENTER || sc->enemy_phase == ENEMY_FIGHT) {
-            play_stance(&sc->enemy);
-            sc->enemy_phase = ENEMY_FIGHT;
-        }
+        if (sc->enemy_phase == ENEMY_FIGHT) play_stance(&sc->enemy);
         break;
 
     case SCENE_WIN:
@@ -252,10 +251,7 @@ void scene_set(Scene *sc, SceneMood mood)
 
     case SCENE_CALL:
         if (hero_ready(sc)) hero_act(sc);
-        if (sc->enemy_phase == ENEMY_ENTER || sc->enemy_phase == ENEMY_FIGHT) {
-            play_stance(&sc->enemy);
-            sc->enemy_phase = ENEMY_FIGHT;
-        }
+        if (sc->enemy_phase == ENEMY_FIGHT) play_stance(&sc->enemy);
         break;
 
     case SCENE_FAIL:

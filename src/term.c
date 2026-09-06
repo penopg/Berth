@@ -435,9 +435,12 @@ void term_update_render_state(Term *t)
     ghostty_render_state_update(t->render_state, t->vt);
 }
 
-bool term_screen_has(Term *t, const char *needle)
+// Общий проход по строкам экрана: каждая строка сводится к ASCII (глиф вне
+// ASCII — «?») и отдаётся проверке; первая удачная — ответ.
+static bool screen_scan(Term *t, bool (*match)(const char *line, const void *arg),
+                        const void *arg)
 {
-    if (!t->vt || !t->render_state || !needle || !*needle) return false;
+    if (!t->vt || !t->render_state) return false;
     ghostty_render_state_update(t->render_state, t->vt);
 
     GhosttyRenderStateRowIterator row_iter = t->row_iter;
@@ -463,7 +466,42 @@ bool term_screen_has(Term *t, const char *needle)
             line[n++] = cps[0] < 128 ? (char)cps[0] : '?';
         }
         line[n] = '\0';
-        if (strstr(line, needle)) return true;
+        if (match(line, arg)) return true;
     }
     return false;
+}
+
+static bool match_has(const char *line, const void *arg)
+{
+    return strstr(line, (const char *)arg) != NULL;
+}
+
+bool term_screen_has(Term *t, const char *needle)
+{
+    if (!needle || !*needle) return false;
+    return screen_scan(t, match_has, needle);
+}
+
+// Строка крутилки Claude Code: глиф, пробел, сообщение, многоточие — и
+// больше ничего. Тот же текст посреди ответа агента (например, в разговоре
+// про сам берт) так не выглядит: вокруг него другие слова.
+static bool match_status(const char *line, const void *arg)
+{
+    const char *msg = (const char *)arg;
+    const char *p = line;
+    while (*p == ' ') p++;
+    if (*p != '?' || p[1] != ' ') return false;
+    p += 2;
+    size_t len = strlen(msg);
+    if (strncmp(p, msg, len) != 0) return false;
+    p += len;
+    if (*p == '?') p++;             // многоточие
+    while (*p == ' ') p++;
+    return *p == '\0';
+}
+
+bool term_screen_status(Term *t, const char *msg)
+{
+    if (!msg || !*msg) return false;
+    return screen_scan(t, match_status, msg);
 }

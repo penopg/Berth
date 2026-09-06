@@ -129,6 +129,7 @@ typedef struct {
     bool  scene_ready;
     unsigned long scene_bytes_seen;   // докуда сцена учла вывод процесса
     bool  compacting;                 // на экране «Compacting conversation»
+    double compact_seen;              // когда строка сжатия видна в последний раз
 
     char name[SESSION_NAME_MAX];    // имя проекта — его показываем в панели
     char cwd[SESSION_PATH_MAX];
