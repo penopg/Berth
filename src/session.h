@@ -127,7 +127,6 @@ typedef struct {
     // активной строки. Заводится при первом кадре, когда сцена включена.
     Scene scene;
     bool  scene_ready;
-    unsigned long scene_bytes_seen;   // докуда сцена учла вывод процесса
     bool  compacting;                 // на экране «Compacting conversation»
     double compact_seen;              // когда строка сжатия видна в последний раз
 

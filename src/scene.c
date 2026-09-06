@@ -13,9 +13,11 @@ static const float WALK_SPEED = 32.0f;
 static const float WALK_FRAME = 0.1f;
 static const float IDLE_LEAVE = 10.0f;  // секунд без дела — и герой уходит
 static const float LYING_LEAVE = 15.0f; // сколько лежит упавший герой
-static const float HIT_BYTES  = 900.0f;  // байт вывода на один удар
-static const float HIT_GAP    = 0.16f;   // не чаще, чем раз в столько секунд
-static const float FLOW_CAP   = 4000.0f; // задел ударов не копится бесконечно
+static const long  HIT_TOKENS = 12;      // меньше этого один удар не кладёт
+static const int   HIT_SPLIT  = 3;       // очередь разбирается примерно за столько ударов
+static const long  HIT_RUSH   = 60;      // очередь от этого размера — темп джебов
+static const float HIT_GAP_SLOW = 0.32f; // пауза между ударами при маленькой очереди
+static const float HIT_GAP_FAST = 0.10f; // и при большой: десять в секунду
 
 static unsigned rnd(Scene *sc)
 {
@@ -217,7 +219,6 @@ void scene_set(Scene *sc, SceneMood mood)
         if (prev != SCENE_COMPACT) {
             sc->fight_from = sc->score;
             sc->screen_from = sc->screen;
-            sc->flow = 0;
             sc->shown = 0;
         }
         sc->hero_next_attack = 0.6f;
@@ -245,7 +246,6 @@ void scene_set(Scene *sc, SceneMood mood)
         sc->result = sc->shown;
         if (sc->score - sc->fight_from > sc->result) sc->result = sc->score - sc->fight_from;
         if (sc->screen - sc->screen_from > sc->result) sc->result = sc->screen - sc->screen_from;
-        sc->flow = 0;
         break;
 
     case SCENE_CALL:
@@ -267,27 +267,53 @@ void scene_set(Scene *sc, SceneMood mood)
     }
 }
 
-static void attack(Scene *sc, SceneActor *a)
+// Удар рукой или ногой; рука чаще. Дальше — снова стойка, пока часы не
+// назначат следующий удар. У героя удар отмечается попаданием: звёздочка
+// загорается, когда конечность доходит до крайнего кадра, и в тот же миг
+// в счёт ложится amount токенов (у противника amount 0: звёздочки нет).
+// rush — темп джебов: кадры короче, замах пропущен, чтобы успевать по
+// десять в секунду.
+static void attack(Scene *sc, SceneActor *a, long amount, bool rush)
 {
-    // Удар рукой или ногой; рука чаще. Дальше — снова стойка, пока часы
-    // не назначат следующий удар. У героя удар отмечается попаданием:
-    // звёздочка загорается, когда конечность доходит до крайнего кадра.
     bool kick = rnd(sc) % 3 == 0;
+    if (kick) {
+        if (rush) {
+            static const int   kf[] = { 1, 3, 3, 1 };
+            static const float kd[] = { 0.025f, 0.03f, 0.03f, 0.02f };
+            play_seq(a, SPR_KICK, kf, kd, 4, false);
+        } else {
+            // Нога: замах быстрый, а в верхней точке нога задерживается на
+            // пару кадров — иначе удара не видно, мелькает.
+            static const int   kf[] = { 0, 1, 2, 3, 3, 1 };
+            static const float kd[] = { 0.035f, 0.035f, 0.035f, 0.07f, 0.07f, 0.035f };
+            play_seq(a, SPR_KICK, kf, kd, 6, false);
+        }
+    } else {
+        if (rush) {
+            static const int   pf[] = { 2, 4, 4, 2 };
+            static const float pd[] = { 0.025f, 0.03f, 0.03f, 0.02f };
+            play_seq(a, SPR_PUNCH, pf, pd, 4, false);
+        } else {
+            play_range(a, SPR_PUNCH, 0, 4, 0.09f, false);
+        }
+    }
     if (a == &sc->hero) {
-        sc->hit_delay = kick ? 0.11f : 0.19f;
-        sc->hit_x = kick ? 25.0f : 22.0f;
-        sc->hit_y = kick ? -34.0f : -29.0f;
+        sc->hit_delay = rush ? 0.03f : (kick ? 0.11f : 0.19f);
+        // Точка попадания гуляет на пару пикселей: одинаковое место у
+        // каждой звёздочки выглядит штампом.
+        sc->hit_x = (kick ? 25.0f : 22.0f) + rndf(sc, -3.0f, 3.0f);
+        sc->hit_y = (kick ? -34.0f : -29.0f) + rndf(sc, -3.0f, 3.0f);
+        sc->hit_amount = amount;
         sc->since_hit = 0;
     }
-    if (kick) {
-        // Нога: замах быстрый, а в верхней точке нога задерживается на пару
-        // кадров — иначе удара не видно, мелькает.
-        static const int   kf[] = { 0, 1, 2, 3, 3, 1 };
-        static const float kd[] = { 0.035f, 0.035f, 0.035f, 0.07f, 0.07f, 0.035f };
-        play_seq(a, SPR_KICK, kf, kd, 6, false);
-    } else {
-        play_range(a, SPR_PUNCH, 0, 4, 0.09f, false);
-    }
+}
+
+// Правда боя: большее из счётчика крутилки и записей jsonl.
+static long fight_target(const Scene *sc)
+{
+    long t = sc->score - sc->fight_from;
+    if (sc->screen - sc->screen_from > t) t = sc->screen - sc->screen_from;
+    return t;
 }
 
 void scene_update(Scene *sc, float dt)
@@ -338,15 +364,28 @@ void scene_update(Scene *sc, float dt)
     switch (sc->mood) {
     case SCENE_FIGHT:
         if (sc->enemy_phase == ENEMY_FIGHT) {
-            // Герой бьёт, когда приходят токены (scene_score); сам — лишь
-            // если давно ничего не приходило, чтобы бой не выглядел замершим.
             sc->since_hit += dt;
-            if (sc->since_hit > 4.0f && hero_free(sc)) attack(sc, &sc->hero);
-            // Удар кончился — стойка, чтобы следующий мог начаться.
+            // Герой бьёт только по очереди токенов: каждый удар уносит
+            // порцию, и чем очередь длиннее, тем удары чаще и короче. Без
+            // токенов стоит в стойке — удар, за которым ничего нет, читался
+            // как шум.
+            long pending = fight_target(sc) - sc->shown;
+            if (sc->hero_phase == HERO_STAY && hero_free(sc) && pending > 0) {
+                bool rush = pending >= HIT_RUSH;
+                if (sc->since_hit >= (rush ? HIT_GAP_FAST : HIT_GAP_SLOW)) {
+                    long amount = pending / HIT_SPLIT;
+                    if (amount < HIT_TOKENS) amount = HIT_TOKENS;
+                    // Хвост добирается целиком: иначе число тянется к
+                    // правде вечно, по кусочку.
+                    if (pending <= 2 * HIT_TOKENS || amount > pending) amount = pending;
+                    attack(sc, &sc->hero, amount, rush);
+                }
+            }
             if (sc->clock >= sc->enemy_next_attack) {
-                attack(sc, &sc->enemy);
+                attack(sc, &sc->enemy, 0, false);
                 sc->enemy_next_attack = sc->clock + rndf(sc, 0.9f, 2.0f);
             }
+            // Удар кончился — стойка, чтобы следующий мог начаться.
             if (sc->hero.done) play_stance(&sc->hero);
             if (sc->enemy.done) play_stance(&sc->enemy);
         }
@@ -393,20 +432,26 @@ void scene_update(Scene *sc, float dt)
     actor_update(&sc->enemy, dt);
     if (sc->bump > 0) sc->bump -= dt;
 
-    // Правда из записей jsonl подтягивает показанное вперёд — плавно, за
-    // доли секунды; если оценка по потоку убежала вперёд, число просто
-    // ждёт, пока правда его догонит.
-    long target = sc->score - sc->fight_from;
-    if (sc->screen - sc->screen_from > target) target = sc->screen - sc->screen_from;
-    if (sc->shown < target) {
+    // В бою число движется только ударами. Вне боя (победа, зов, сжатие)
+    // бить некому, и остаток правды догоняется плавно и без подскока:
+    // итог должен встать на место, но подскакивать нечему.
+    long target = fight_target(sc);
+    if (sc->shown < target && !(sc->mood == SCENE_FIGHT && sc->enemy_phase == ENEMY_FIGHT)) {
         long step = (long)((float)(target - sc->shown) * (dt * 5.0f)) + 1;
         sc->shown += step;
         if (sc->shown > target) sc->shown = target;
     }
     if (sc->hit_delay > 0) {
         sc->hit_delay -= dt;
-        // Попадание: вспышка и подскок счётчика в один момент.
-        if (sc->hit_delay <= 0) { sc->hit_t = 0.22f; sc->bump = 0.28f; }
+        // Попадание: порция ложится в счёт, и вспышка с подскоком — в тот
+        // же миг. Удар без токенов — просто удар.
+        if (sc->hit_delay <= 0 && sc->hit_amount > 0) {
+            sc->shown += sc->hit_amount;
+            if (sc->shown > target) sc->shown = target;
+            sc->hit_amount = 0;
+            sc->hit_t = 0.22f;
+            sc->bump = 0.28f;
+        }
     } else if (sc->hit_t > 0) {
         sc->hit_t -= dt;
     }
@@ -448,22 +493,6 @@ const char *scene_mood_name(SceneMood m)
     return m >= 0 && m < SCENE_MOOD_COUNT ? names[m] : "?";
 }
 
-void scene_activity(Scene *sc, unsigned long bytes, float dt)
-{
-    // Мелкий трафик — крутилка и часы Claude Code, не работа: он не считается.
-    // Крупные порции — текст, который агент пишет прямо сейчас.
-    if (sc->mood == SCENE_FIGHT && bytes >= 48) {
-        sc->flow += (float)bytes;
-        if (sc->flow > FLOW_CAP) sc->flow = FLOW_CAP;
-    }
-    if (sc->flow >= HIT_BYTES && sc->enemy_phase == ENEMY_FIGHT && sc->hero_phase == HERO_STAY
-        && hero_free(sc) && sc->since_hit >= HIT_GAP) {
-        sc->flow -= HIT_BYTES;
-        attack(sc, &sc->hero);
-    }
-    (void)dt;
-}
-
 void scene_screen(Scene *sc, long tokens)
 {
     if (tokens > sc->screen) sc->screen = tokens;   // назад не ходит
@@ -471,11 +500,5 @@ void scene_screen(Scene *sc, long tokens)
 
 void scene_score(Scene *sc, long score)
 {
-    // Приращение во время боя подбрасывает счётчик: видно, что цифра
-    // живая, а не нарисованная.
-    // Запись jsonl — правда: оценка из потока сбрасывается, счёт встаёт на
-    // место. Если правда пришла без потока (удары не шли) — подскок сразу.
-    if (score > sc->score && sc->mood == SCENE_FIGHT && sc->flow <= 0 && sc->since_hit > 1.0f)
-        sc->bump = 0.28f;
-    sc->score = score;
+    if (score > sc->score) sc->score = score;   // назад не ходит
 }

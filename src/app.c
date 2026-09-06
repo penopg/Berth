@@ -316,7 +316,6 @@ static void scene_tick(App *app, float dt)
         if (!s->scene_ready) {
             scene_init(&s->scene);
             s->scene_ready = true;
-            s->scene_bytes_seen = s->term.bytes_in;
         }
         if (ctx_due) {
             session_track_ctx(s);
@@ -347,9 +346,6 @@ static void scene_tick(App *app, float dt)
                 s->screen_last = on_screen;
             }
         }
-        unsigned long seen = s->term.bytes_in;
-        scene_activity(&s->scene, seen - s->scene_bytes_seen, dt);
-        s->scene_bytes_seen = seen;
         scene_score(&s->scene, s->tokens_out);
         scene_screen(&s->scene, s->screen_base + s->screen_last);
         SceneMood before = s->scene.mood;

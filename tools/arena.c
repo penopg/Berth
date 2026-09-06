@@ -101,19 +101,22 @@ int main(int argc, char **argv)
                      16, 16, 10, LIGHTGRAY);
         } else {
             scene_draw(&sc, &sp, 200, floor, scale, (Color){ 235, 80, 70, 255 });
-            // Клавиша T — как будто пришли токены: удар и подскок счёта.
-            if (IsKeyPressed(KEY_T)) scene_score(&sc, sc.score + 700);
-            // Зажатая B — как будто агент льёт текст: удары подряд.
-            scene_activity(&sc, IsKeyDown(KEY_B) ? 500 : 0, dt);
+            // T — счётчик крутилки подрос сразу на 120: серия джебов.
+            if (IsKeyPressed(KEY_T)) scene_screen(&sc, sc.screen + 120);
+            // Зажатая B — модель пишет ровно, ~120 токенов в секунду.
+            if (IsKeyDown(KEY_B)) scene_screen(&sc, sc.screen + 2);
+            // Y — редкая капля: один полный удар.
+            if (IsKeyPressed(KEY_Y)) scene_screen(&sc, sc.screen + 12);
         }
         double draw_ms = (GetTime() - t0) * 1000.0;
         draw_total += draw_ms;
         frames++;
 
-        DrawText(TextFormat("1 idle  2 fight  3 win  4 call  5 fail  6 compact  t tokens  b (hold) stream  space pause  f frames  +/- scale (%d)",
+        DrawText(TextFormat("1 idle  2 fight  3 win  4 call  5 fail  6 compact  t +120  y +12  b (hold) stream  space pause  f frames  +/- scale (%d)",
                             (int)scale), 16, 290, 10, GRAY);
-        DrawText(TextFormat("mood: %d   enemy phase: %d   scene draw %.3f ms   frame %.2f ms",
-                            sc.mood, sc.enemy_phase, draw_ms, dt * 1000.0f),
+        DrawText(TextFormat("mood: %d   enemy phase: %d   score %ld / %ld   scene draw %.3f ms   frame %.2f ms",
+                            sc.mood, sc.enemy_phase, scene_fight_score(&sc), sc.screen - sc.screen_from,
+                            draw_ms, dt * 1000.0f),
                  16, 270, 10, GRAY);
         EndDrawing();
     }
