@@ -1008,22 +1008,52 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         break;
     }
 
+    case PAGE_EVENT_UNDESC_TOGGLE:
+        s->page_undesc_open = !s->page_undesc_open;
+        break;
+
+    case PAGE_EVENT_UFILE_OPEN: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->files.undesc_count) break;
+        const char *rel = st->files.undesc[ev.arg];
+        char target[PROJECT_PATH_MAX + FILE_PATH_MAX + 2];
+        snprintf(target, sizeof(target), "%s/%s", s->cwd, rel);
+        const char *dot = strrchr(rel, '.');
+        bool textual = dot && (!strcasecmp(dot, ".md") || !strcasecmp(dot, ".txt"));
+        open_with(target, textual ? "-t" : NULL);
+        snprintf(s->page_notice, sizeof(s->page_notice), "%s", rel);
+        break;
+    }
+
+    case PAGE_EVENT_DESCRIBE_FILE:
     case PAGE_EVENT_DESCRIBE_FILES: {
         // Задачей-вкладкой, как журнал и сводка: скилл berth-files обходит
-        // папку и дописывает строки на всё, чего в реестре нет. Права
-        // точечно: посмотреть папку и файлы, дописать реестр.
+        // папку и дописывает строки на всё, чего в реестре нет — или на один
+        // названный файл. Права точечно: посмотреть папку и файлы, дописать
+        // реестр.
         int was = app->sessions.active;
-        char cmd[900];
+        char ask[FILE_PATH_MAX + 200];
+        if (ev.kind == PAGE_EVENT_DESCRIBE_FILE) {
+            const ProjectState *st = projstate_peek(s->cwd);
+            if (!st || ev.arg < 0 || ev.arg >= st->files.undesc_count) break;
+            snprintf(ask, sizeof(ask),
+                     "По скиллу berth-files опиши один документ проекта: %s — прочитай его "
+                     "и добавь строку в .berth/files.tsv. Другие файлы не трогай.",
+                     st->files.undesc[ev.arg]);
+        } else {
+            snprintf(ask, sizeof(ask),
+                     "По скиллу berth-files опиши документы проекта: обойди папку, для "
+                     "каждого документа, которого нет в .berth/files.tsv, добавь строку с "
+                     "пояснением. Существующие строки не переписывай.");
+        }
+        char cmd[1200];
         snprintf(cmd, sizeof(cmd),
-                 "claude -p \"По скиллу berth-files опиши документы проекта: обойди папку, "
-                 "для каждого документа, которого нет в .berth/files.tsv, добавь строку с "
-                 "пояснением. Существующие строки не переписывай.\" "
-                 "--verbose --no-session-persistence%s "
+                 "claude -p \"%s\" --verbose --no-session-persistence%s "
                  "--permission-mode acceptEdits "
                  "--allowed-tools \"Bash(find *)\" \"Bash(ls *)\" \"Bash(head *)\" "
                  "\"Bash(wc *)\" \"Bash(awk *)\" \"Bash(file *)\" "
                  "Read Glob Grep Edit Write",
-                 task_model_flag(app));
+                 ask, task_model_flag(app));
         int tab = open_task(app, s->project, s->cwd, "документы", cmd);
         if (tab >= 0) {
             session_activate(&app->sessions, was);

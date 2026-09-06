@@ -1414,7 +1414,9 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
 // приглушённым: реестр устарел, и это должно быть видно, а не спрятано.
 static void draw_files(Ctx *c, const Session *s, const FileList *fl)
 {
-    if (!fl || !fl->exists) return;
+    // Раздел есть у любого проекта, где нашлись документы: реестр — лишь
+    // пояснения к ним, а сами файлы берт находит обходом папки.
+    if (!fl || (!fl->exists && fl->undescribed <= 0)) return;
 
     char title[64];
     snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы", fl->count);
@@ -1466,24 +1468,69 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
         gap(c, 0);
         c->y += 4;
     }
-    if (fl->count == 0)
+    if (fl->count == 0 && fl->exists)
         text(c, "Реестр пуст", c->theme->row_text_dim);
     if (fl->partial)
         text(c, "В реестре строк больше, чем показано", c->theme->row_text_dim);
 
-    // Неописанные документы: число по обходу папки и действие. Обход
-    // ограничен, поэтому число может быть «не меньше».
+    // Документы без пояснения — то, что положили руками или агент не
+    // записал. Свёрнуто: важно число; имена — по клику, у каждого
+    // «Описать», под списком «Описать все». Обход ограничен, поэтому число
+    // может быть «не меньше».
     if (fl->undescribed > 0) {
         gap(c, 1);
-        char note[96];
-        snprintf(note, sizeof(note), "ещё %s%d %s без пояснения",
-                 fl->scan_cut ? "не меньше " : "", fl->undescribed,
-                 plural3(fl->undescribed, "файл", "файла", "файлов"));
+        char head[96];
+        snprintf(head, sizeof(head), "Без пояснения · %s%d",
+                 fl->scan_cut ? "не меньше " : "", fl->undescribed);
+        if (fold_row(c, head, s->page_undesc_open ? NULL : "положены руками или ещё не описаны",
+                     s->page_undesc_open, c->theme->row_text_dim))
+            set_event(c, PAGE_EVENT_UNDESC_TOGGLE, 0, NULL);
+        if (!s->page_undesc_open) return;
+
+        int indent = cw * 2;
+        for (int i = 0; i < fl->undesc_count; i++) {
+            const char *path = fl->undesc[i];
+            Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
+            bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+            if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            int right = c->x + content_width(c);
+            bool describe_hit = false;
+            if (hover) {
+                const char *act = "Описать";
+                int aw = chars_of(act) * cw;
+                Rect ar = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
+                bool ah = inside(ar, c->mouse);
+                if (ah) DrawRectangle(ar.x, ar.y, ar.w, ar.h, c->theme->sidebar_border);
+                ui_text_clipped(c->font, act, ar.x + 8, c->y,
+                                ah ? c->theme->row_text : c->theme->row_text_dim, aw);
+                describe_hit = ah;
+                right = ar.x - cw;
+            }
+            int nw = ui_text_clipped(c->font, base, c->x + indent, c->y, c->theme->row_text,
+                                     (right - c->x - indent) / 2);
+            // Папка — приглушённо после имени, если файл не в корне.
+            if (base != path) {
+                char dir[FILE_PATH_MAX];
+                snprintf(dir, sizeof(dir), "%.*s", (int)(base - path - 1), path);
+                ui_text_clipped(c->font, dir, c->x + indent + nw + cw, c->y,
+                                c->theme->row_text_dim, right - (c->x + indent + nw + cw));
+            }
+            if (hover && c->click)
+                set_event(c, describe_hit ? PAGE_EVENT_DESCRIBE_FILE : PAGE_EVENT_UFILE_OPEN,
+                          i, NULL);
+            c->y += c->line + 4;
+        }
+        if (fl->undescribed > fl->undesc_count) {
+            char more[64];
+            snprintf(more, sizeof(more), "и ещё %d", fl->undescribed - fl->undesc_count);
+            text(c, more, c->theme->row_text_dim);
+        }
         row_begin(c);
-        ui_text_clipped(c->font, note, c->row_x, c->y + 6, c->theme->row_text_dim,
-                        content_width(c) / 2);
-        c->row_x += chars_of(note) * cw + cw * 2;
-        if (button(c, "Описать", false))
+        c->row_x = c->x + indent;
+        if (button(c, fl->undescribed > 1 ? "Описать все" : "Описать", false))
             set_event(c, PAGE_EVENT_DESCRIBE_FILES, 0, NULL);
         row_end(c);
     }

@@ -1,5 +1,6 @@
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 #include <sys/stat.h>
@@ -38,7 +39,7 @@ void files_load(FileList *fl, const char *cwd)
     char path[700];
     files_path(cwd, path, sizeof(path));
     FILE *f = fopen(path, "r");
-    if (!f) return;
+    if (!f) { files_refresh(fl, cwd); return; }   // реестра нет — но папку смотрим
     fl->exists = true;
     fl->mtime = file_mtime(path);
 
@@ -116,7 +117,7 @@ static bool listed(const FileList *fl, const char *rel)
 }
 
 typedef struct {
-    const FileList *fl;
+    FileList *fl;
     int   budget;
     int   found;
     bool  cut;
@@ -156,15 +157,24 @@ static void scan_dir(Scan *sc, const char *root, const char *rel, int depth)
             }
             if (!skip) scan_dir(sc, root, sub, depth + 1);
         } else if (de->d_type == DT_REG) {
-            if (files_is_document(sub) && !listed(sc->fl, sub)) sc->found++;
+            if (files_is_document(sub) && !listed(sc->fl, sub)) {
+                if (sc->found < FILES_UNDESC_MAX)
+                    snprintf(sc->fl->undesc[sc->found], FILE_PATH_MAX, "%s", sub);
+                sc->found++;
+            }
         }
     }
     closedir(d);
 }
 
+static int cmp_path(const void *a, const void *b)
+{
+    return strcmp((const char *)a, (const char *)b);
+}
+
 void files_refresh(FileList *fl, const char *cwd)
 {
-    if (!cwd || !*cwd || !fl->exists) return;
+    if (!cwd || !*cwd) return;
     for (int i = 0; i < fl->count; i++) {
         FileEntry *e = &fl->items[i];
         char abs[1024];
@@ -178,6 +188,10 @@ void files_refresh(FileList *fl, const char *cwd)
     Scan sc = { fl, SCAN_LIMIT, 0, false };
     scan_dir(&sc, cwd, "", 0);
     fl->undescribed = sc.found;
+    fl->undesc_count = sc.found < FILES_UNDESC_MAX ? sc.found : FILES_UNDESC_MAX;
+    // Порядок readdir случаен; по алфавиту список читается и не прыгает
+    // между обходами.
+    qsort(fl->undesc, (size_t)fl->undesc_count, FILE_PATH_MAX, cmp_path);
     fl->scan_cut = sc.cut;
     fl->scanned_at = now;
 }
