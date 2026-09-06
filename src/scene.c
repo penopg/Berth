@@ -165,6 +165,11 @@ static void hero_act(Scene *sc)
     case SCENE_FAIL:
         play_range(&sc->hero, SPR_DEATH, 0, 4, 0.14f, false);
         break;
+    case SCENE_COMPACT:
+        play_range(&sc->hero, SPR_WALK, 0, 9, WALK_FRAME, true);
+        sc->pace_dir = 1;
+        sc->hero.flip = false;
+        break;
     default:
         play_stance(&sc->hero);
         break;
@@ -190,9 +195,15 @@ static void enemy_leave(Scene *sc)
 void scene_set(Scene *sc, SceneMood mood)
 {
     if (mood == sc->mood) return;
+    SceneMood prev = sc->mood;
     sc->mood = mood;
     sc->clock = 0;
     sc->idle = 0;
+    // Из уборки — на место: герой мог уйти в сторону.
+    if (prev == SCENE_COMPACT && sc->hero_phase == HERO_STAY) {
+        sc->hero.x = 0;
+        sc->hero.flip = false;
+    }
 
     switch (mood) {
     case SCENE_IDLE:
@@ -204,12 +215,26 @@ void scene_set(Scene *sc, SceneMood mood)
     case SCENE_FIGHT:
         if (hero_ready(sc)) hero_act(sc);
         if (sc->enemy_phase != ENEMY_FIGHT) enemy_enter(sc);
-        sc->fight_from = sc->score;
-        sc->flow = 0;
-        sc->shown = 0;
-        sc->accrual = 0;
+        // После сжатия бой продолжается с тем же счётом: это тот же кусок
+        // работы, просто с уборкой посередине.
+        if (prev != SCENE_COMPACT) {
+            sc->fight_from = sc->score;
+            sc->flow = 0;
+            sc->shown = 0;
+            sc->accrual = 0;
+        }
         sc->hero_next_attack = 0.6f;
         sc->enemy_next_attack = 1.1f;
+        break;
+
+    case SCENE_COMPACT:
+        // Уборка: герой ходит взад-вперёд, противник, если он здесь, ждёт в
+        // стойке. Не бой — поток вывода в это время не про работу.
+        if (hero_ready(sc)) hero_act(sc);
+        if (sc->enemy_phase == ENEMY_ENTER || sc->enemy_phase == ENEMY_FIGHT) {
+            play_stance(&sc->enemy);
+            sc->enemy_phase = ENEMY_FIGHT;
+        }
         break;
 
     case SCENE_WIN:
@@ -338,6 +363,16 @@ void scene_update(Scene *sc, float dt)
         if (sc->clock > 3.5f && playing(&sc->hero, SPR_VICTORY)) play_stance(&sc->hero);
         break;
 
+    case SCENE_COMPACT:
+        // Шаг вправо до края ячейки, разворот, шаг влево — и так, пока
+        // сжатие не кончится.
+        if (sc->hero_phase == HERO_STAY && playing(&sc->hero, SPR_WALK)) {
+            sc->hero.x += (float)sc->pace_dir * WALK_SPEED * 0.6f * dt;
+            if (sc->hero.x > 10.0f) { sc->pace_dir = -1; sc->hero.flip = true; }
+            if (sc->hero.x < -6.0f) { sc->pace_dir = 1;  sc->hero.flip = false; }
+        }
+        break;
+
     case SCENE_FAIL:
         // Противник постоял над героем и ушёл; упавший герой полежал и исчез.
         if (sc->clock > 2.0f && sc->enemy_phase == ENEMY_FIGHT) enemy_leave(sc);
@@ -350,7 +385,7 @@ void scene_update(Scene *sc, float dt)
     // Без дела герой не стоит: работа кончилась, противник пропал — через
     // несколько секунд уходит и он. Пока зовёт (поклон) — остаётся: это
     // просьба к человеку, и она должна быть на виду.
-    bool busy = sc->mood == SCENE_FIGHT || sc->mood == SCENE_CALL
+    bool busy = sc->mood == SCENE_FIGHT || sc->mood == SCENE_CALL || sc->mood == SCENE_COMPACT
              || sc->enemy_phase != ENEMY_NONE;
     if (sc->hero_phase == HERO_STAY && !busy && sc->mood != SCENE_FAIL) {
         sc->idle += dt;
@@ -413,7 +448,7 @@ void scene_draw(const Scene *sc, const Sprites *sp, float x, float floor, float 
 
 const char *scene_mood_name(SceneMood m)
 {
-    static const char *names[] = { "свободен", "работает", "победа", "зовёт", "упал" };
+    static const char *names[] = { "свободен", "работает", "победа", "зовёт", "упал", "сжатие" };
     return m >= 0 && m < SCENE_MOOD_COUNT ? names[m] : "?";
 }
 

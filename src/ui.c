@@ -459,6 +459,10 @@ static void draw_item_row(const PanelRow *row, const Project *project,
         ui_text_clipped(f, session_subtitle(session), text_x, line_y2, sub, avail2);
     }
 
+    // Третья линия при сжатии — подпись вместо счёта: бой на паузе.
+    if (scene && scene->mood == SCENE_COMPACT)
+        ui_text_clipped(f, "сжатие контекста…", text_x, line_y3, th->row_text_dim, avail);
+
     // Третья линия — счёт боя: точка, что дышит в такт и вспыхивает на
     // попадании, число токенов с начала боя и приглушённая единица «tok».
     if (scene && scene->mood == SCENE_FIGHT && scene->enemy_phase == ENEMY_FIGHT) {

@@ -112,6 +112,13 @@ void term_set_palette(Term *t, GhosttyColorRgb cursor, const GhosttyColorRgb ans
 // Обновить снимок для отрисовки. Дальше рисующему коду терминал не нужен.
 void term_update_render_state(Term *t);
 
+// Есть ли на экране (в видимых строках) такая ASCII-строка. Обновляет
+// снимок экрана и проходит по ячейкам: цена — как у одного кадра
+// отрисовки без рисования. Нужна, чтобы отличить сжатие контекста от
+// работы: снаружи Claude Code и там и там «busy», а на экране пишет
+// «Compacting conversation».
+bool term_screen_has(Term *t, const char *needle);
+
 // true, если сессия ещё жива.
 static inline bool term_alive(const Term *t) { return !t->child_exited; }
 

@@ -434,3 +434,36 @@ void term_update_render_state(Term *t)
 {
     ghostty_render_state_update(t->render_state, t->vt);
 }
+
+bool term_screen_has(Term *t, const char *needle)
+{
+    if (!t->vt || !t->render_state || !needle || !*needle) return false;
+    ghostty_render_state_update(t->render_state, t->vt);
+
+    GhosttyRenderStateRowIterator row_iter = t->row_iter;
+    GhosttyRenderStateRowCells    cells    = t->row_cells;
+    if (ghostty_render_state_get(t->render_state,
+            GHOSTTY_RENDER_STATE_DATA_ROW_ITERATOR, &row_iter) != GHOSTTY_SUCCESS)
+        return false;
+
+    char line[1024];
+    while (ghostty_render_state_row_iterator_next(row_iter)) {
+        if (ghostty_render_state_row_get(row_iter,
+                GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &cells) != GHOSTTY_SUCCESS)
+            continue;
+        size_t n = 0;
+        while (ghostty_render_state_row_cells_next(cells) && n + 1 < sizeof(line)) {
+            uint32_t len = 0;
+            ghostty_render_state_row_cells_get(cells,
+                GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_LEN, &len);
+            if (len == 0) { line[n++] = ' '; continue; }
+            uint32_t cps[16];
+            ghostty_render_state_row_cells_get(cells,
+                GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_GRAPHEMES_BUF, cps);
+            line[n++] = cps[0] < 128 ? (char)cps[0] : '?';
+        }
+        line[n] = '\0';
+        if (strstr(line, needle)) return true;
+    }
+    return false;
+}

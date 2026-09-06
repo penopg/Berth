@@ -289,12 +289,12 @@ static void apply_settings(App *app)
 static SceneMood scene_mood_for(const Session *s, SceneMood prev)
 {
     switch (s->state) {
-    case SESSION_STATE_BUSY:      return SCENE_FIGHT;
+    case SESSION_STATE_BUSY:      return s->compacting ? SCENE_COMPACT : SCENE_FIGHT;
     case SESSION_STATE_ATTENTION: return SCENE_CALL;
     case SESSION_STATE_DEAD:      return SCENE_FAIL;
     default:
         if (prev == SCENE_FIGHT || prev == SCENE_WIN) return SCENE_WIN;
-        return SCENE_IDLE;
+        return SCENE_IDLE;   // после сжатия без работы — просто разошлись
     }
 }
 
@@ -318,7 +318,14 @@ static void scene_tick(App *app, float dt)
             s->scene_ready = true;
             s->scene_bytes_seen = s->term.bytes_in;
         }
-        if (ctx_due) session_track_ctx(s);
+        if (ctx_due) {
+            session_track_ctx(s);
+            // Сжатие контекста снаружи неотличимо от работы — реестр
+            // пишет «busy». Зато на экране вкладки в это время строка
+            // «Compacting conversation»; ищем её, пока агент занят.
+            s->compacting = s->state == SESSION_STATE_BUSY
+                         && term_screen_has(&s->term, "Compacting conversation");
+        }
         unsigned long seen = s->term.bytes_in;
         scene_activity(&s->scene, seen - s->scene_bytes_seen, dt);
         s->scene_bytes_seen = seen;

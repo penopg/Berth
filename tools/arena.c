@@ -56,6 +56,7 @@ int main(int argc, char **argv)
             if (IsKeyPressed(KEY_THREE)) scene_set(&sc, SCENE_WIN);
             if (IsKeyPressed(KEY_FOUR))  scene_set(&sc, SCENE_CALL);
             if (IsKeyPressed(KEY_FIVE))  scene_set(&sc, SCENE_FAIL);
+            if (IsKeyPressed(KEY_SIX))   scene_set(&sc, SCENE_COMPACT);
             if (IsKeyPressed(KEY_SPACE)) paused = !paused;
             if (IsKeyPressed(KEY_F))     browse = !browse;
             if (IsKeyPressed(KEY_EQUAL) && scale < 8) scale += 1;
@@ -109,7 +110,7 @@ int main(int argc, char **argv)
         draw_total += draw_ms;
         frames++;
 
-        DrawText(TextFormat("1 idle  2 fight  3 win  4 call  5 fail  t tokens  b (hold) stream  space pause  f frames  +/- scale (%d)",
+        DrawText(TextFormat("1 idle  2 fight  3 win  4 call  5 fail  6 compact  t tokens  b (hold) stream  space pause  f frames  +/- scale (%d)",
                             (int)scale), 16, 290, 10, GRAY);
         DrawText(TextFormat("mood: %d   enemy phase: %d   scene draw %.3f ms   frame %.2f ms",
                             sc.mood, sc.enemy_phase, draw_ms, dt * 1000.0f),
