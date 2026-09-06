@@ -1,6 +1,7 @@
 // Сессия терминала. Колбэки-эффекты и декодер PNG — производное от main.c
 // проекта Ghostling (MIT); жизненный цикл Term написан заново.
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
@@ -504,4 +505,36 @@ bool term_screen_status(Term *t, const char *msg)
 {
     if (!msg || !*msg) return false;
     return screen_scan(t, match_status, msg);
+}
+
+// Строка крутилки с работой: «✻ Sprouting… (14s · ↓ 740 tokens)», в ASCII —
+// «? Sprouting? (14s ? ? 740 tokens)». Число бывает «1.2k». Берём нижнюю
+// такую строку: крутилка стоит внизу, а выше может лежать её цитата.
+typedef struct { long tokens; } TokensScan;
+
+static bool match_tokens(const char *line, const void *arg)
+{
+    TokensScan *out = (TokensScan *)arg;
+    const char *p = line;
+    while (*p == ' ') p++;
+    if (*p != '?' || p[1] != ' ') return false;
+    const char *par = strchr(p, '(');
+    if (!par) return false;
+    const char *q = strstr(par, "? ? ");
+    if (!q) return false;
+    q += 4;
+    char *end = NULL;
+    double v = strtod(q, &end);
+    if (end == q || v < 0) return false;
+    if (*end == 'k') { v *= 1000; end++; }
+    if (strncmp(end, " tokens", 7) != 0) return false;
+    out->tokens = (long)v;
+    return false;   // идём дальше: нужна самая нижняя
+}
+
+long term_screen_tokens(Term *t)
+{
+    TokensScan scan = { -1 };
+    screen_scan(t, match_tokens, &scan);
+    return scan.tokens;
 }

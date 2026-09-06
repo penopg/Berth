@@ -16,9 +16,6 @@ static const float LYING_LEAVE = 15.0f; // сколько лежит упавш�
 static const float HIT_BYTES  = 900.0f;  // байт вывода на один удар
 static const float HIT_GAP    = 0.16f;   // не чаще, чем раз в столько секунд
 static const float FLOW_CAP   = 4000.0f; // задел ударов не копится бесконечно
-static const float BYTES_PER_TOKEN = 28.0f; // оценка из потока, с запасом вниз:
-                                            // интерфейс перерисовывает строки,
-                                            // и байт заметно больше, чем токенов
 
 static unsigned rnd(Scene *sc)
 {
@@ -219,9 +216,9 @@ void scene_set(Scene *sc, SceneMood mood)
         // работы, просто с уборкой посередине.
         if (prev != SCENE_COMPACT) {
             sc->fight_from = sc->score;
+            sc->screen_from = sc->screen;
             sc->flow = 0;
             sc->shown = 0;
-            sc->accrual = 0;
         }
         sc->hero_next_attack = 0.6f;
         sc->enemy_next_attack = 1.1f;
@@ -245,7 +242,9 @@ void scene_set(Scene *sc, SceneMood mood)
             play_range(&sc->enemy, SPR_DEATH, 0, 4, 0.14f, false);
         }
         if (sc->hero_phase == HERO_STAY) hero_act(sc);
-        sc->result = sc->shown > sc->score - sc->fight_from ? sc->shown : sc->score - sc->fight_from;
+        sc->result = sc->shown;
+        if (sc->score - sc->fight_from > sc->result) sc->result = sc->score - sc->fight_from;
+        if (sc->screen - sc->screen_from > sc->result) sc->result = sc->screen - sc->screen_from;
         sc->flow = 0;
         break;
 
@@ -398,6 +397,7 @@ void scene_update(Scene *sc, float dt)
     // доли секунды; если оценка по потоку убежала вперёд, число просто
     // ждёт, пока правда его догонит.
     long target = sc->score - sc->fight_from;
+    if (sc->screen - sc->screen_from > target) target = sc->screen - sc->screen_from;
     if (sc->shown < target) {
         long step = (long)((float)(target - sc->shown) * (dt * 5.0f)) + 1;
         sc->shown += step;
@@ -455,12 +455,6 @@ void scene_activity(Scene *sc, unsigned long bytes, float dt)
     if (sc->mood == SCENE_FIGHT && bytes >= 48) {
         sc->flow += (float)bytes;
         if (sc->flow > FLOW_CAP) sc->flow = FLOW_CAP;
-        // Счёт растёт по потоку, всегда вперёд; запись jsonl потом
-        // подтянет его, если оценка отстала. Назад — никогда: откат
-        // читается как сбой, опережение — нет.
-        sc->accrual += (float)bytes / BYTES_PER_TOKEN;
-        long whole = (long)sc->accrual;
-        if (whole > 0) { sc->shown += whole; sc->accrual -= (float)whole; }
     }
     if (sc->flow >= HIT_BYTES && sc->enemy_phase == ENEMY_FIGHT && sc->hero_phase == HERO_STAY
         && hero_free(sc) && sc->since_hit >= HIT_GAP) {
@@ -468,6 +462,11 @@ void scene_activity(Scene *sc, unsigned long bytes, float dt)
         attack(sc, &sc->hero);
     }
     (void)dt;
+}
+
+void scene_screen(Scene *sc, long tokens)
+{
+    if (tokens > sc->screen) sc->screen = tokens;   // назад не ходит
 }
 
 void scene_score(Scene *sc, long score)

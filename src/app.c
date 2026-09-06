@@ -332,17 +332,26 @@ static void scene_tick(App *app, float dt)
                 "Compacting conversation", "Running PreCompact hooks",
                 "Running PostCompact hooks", "Running SessionStart hooks",
             };
-            bool seen = false;
+            bool spinner = false;
             if (s->state == SESSION_STATE_BUSY)
-                for (size_t k = 0; k < sizeof(compact_msgs) / sizeof(*compact_msgs) && !seen; k++)
-                    seen = term_screen_status(&s->term, compact_msgs[k]);
-            if (seen) s->compact_seen = now;
+                for (size_t k = 0; k < sizeof(compact_msgs) / sizeof(*compact_msgs) && !spinner; k++)
+                    spinner = term_screen_status(&s->term, compact_msgs[k]);
+            if (spinner) s->compact_seen = now;
             s->compacting = s->state == SESSION_STATE_BUSY && s->compact_seen > 0 && now - s->compact_seen < 2.0;
+
+            // Счётчик крутилки «↓ N tokens» — токены за ход, в реальном
+            // времени. Ход сменился — число упало: прошлое уходит в базу.
+            long on_screen = term_screen_tokens(&s->term);
+            if (on_screen >= 0) {
+                if (on_screen < s->screen_last) s->screen_base += s->screen_last;
+                s->screen_last = on_screen;
+            }
         }
         unsigned long seen = s->term.bytes_in;
         scene_activity(&s->scene, seen - s->scene_bytes_seen, dt);
         s->scene_bytes_seen = seen;
         scene_score(&s->scene, s->tokens_out);
+        scene_screen(&s->scene, s->screen_base + s->screen_last);
         SceneMood before = s->scene.mood;
         scene_set(&s->scene, scene_mood_for(s, s->scene.mood));
         if (before == SCENE_FIGHT && s->scene.mood == SCENE_WIN) xp_fight(s->cwd);

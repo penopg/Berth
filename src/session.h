@@ -159,6 +159,9 @@ typedef struct {
     // (ctx_spent_since), по тому же mtime.
     long tokens_out;
     long spent_offset;        // докуда jsonl прочитан; -1 — ещё не начинали
+    // То же с экрана, по счётчику крутилки: он за один ход и обнуляется с
+    // новым, поэтому копится через базу — упавшее число значит новый ход.
+    long screen_base, screen_last;
     bool spent_started;
     char spent_last_id[64];
 } Session;

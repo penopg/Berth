@@ -122,6 +122,10 @@ bool term_screen_has(Term *t, const char *needle);
 // «<глиф> <msg>…» и ничего больше. Поиск по всему экрану ловил фразу в
 // тексте ответа агента и включал «сжатие» посреди обычной работы.
 bool term_screen_status(Term *t, const char *msg);
+// Счётчик токенов у крутилки Claude Code («↓ 740 tokens»): токены ответа
+// за текущий ход, растёт по потоку от API — вместе с размышлениями,
+// которых на экране нет. -1, если крутилки с числом на экране нет.
+long term_screen_tokens(Term *t);
 
 // true, если сессия ещё жива.
 static inline bool term_alive(const Term *t) { return !t->child_exited; }
