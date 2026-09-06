@@ -28,6 +28,7 @@
 #include "groups.h"
 #include "subprojects.h"
 #include "skills.h"
+#include "xp.h"
 #if defined(__APPLE__)
 #include "macos.h"
 #include "icon_png.h"
@@ -49,6 +50,10 @@ typedef struct {
     Theme       theme;
     Settings    settings;
     Usage       usage;        // лимиты Claude Code для верхней полосы
+
+    // Атлас спрайтов каратеки — один на окно, грузится после создания окна.
+    // Сцены живут при вкладках (Session.scene).
+    Sprites     sprites;
     Groups      groups;       // группы-папки и скрытые группы
 
     char brief_cmd[PROJECT_PATH_MAX];   // пусто, если паспорт печатать нечем
@@ -105,6 +110,11 @@ static LayoutMetrics metrics_for(const FontAtlas *f)
         .row_height      = f->cell_height * 2 + 10,
         .row_height_idle = f->cell_height + 8,
         .task_height     = f->cell_height + 6,
+        // Строка со сценой — три текстовые линии: имя, состояние, счёт боя;
+        // пол сцены лежит на третьей. Спрайт NES ниже трёх линий любого
+        // разумного кегля, но на всякий случай — не меньше него.
+        .row_height_scene = (f->cell_height * 3 + 8 > SCENE_HEIGHT + 8)
+                          ? f->cell_height * 3 + 8 : SCENE_HEIGHT + 8,
         .group_height    = f->cell_height + 26,   // отбивка сверху больше межстрочной
         .topbar_height   = f->cell_height + 14,
         .settings_width  = f->cell_width * 12 + 20,
@@ -270,6 +280,54 @@ static void apply_settings(App *app)
     app->layout.ctx_warn = app->settings.ctx_warn;
     app->layout.ctx_crit = app->settings.ctx_crit;
     app->layout.sleep_after = app->settings.sleep_after * 60;
+    app->layout.scene = settings_scene_enabled(&app->settings) && app->sprites.ready;
+}
+
+// Настроение сцены по состоянию агента. Работа кончилась — победа: агент
+// снова свободен после того, как был занят. Свободный с самого начала —
+// просто стойка.
+static SceneMood scene_mood_for(const Session *s, SceneMood prev)
+{
+    switch (s->state) {
+    case SESSION_STATE_BUSY:      return SCENE_FIGHT;
+    case SESSION_STATE_ATTENTION: return SCENE_CALL;
+    case SESSION_STATE_DEAD:      return SCENE_FAIL;
+    default:
+        if (prev == SCENE_FIGHT || prev == SCENE_WIN) return SCENE_WIN;
+        return SCENE_IDLE;
+    }
+}
+
+// Сцены всех живых разговоров идут каждый кадр: бой у неактивной вкладки
+// виден в её строке и потому должен продолжаться. Цена — несколько
+// сравнений на вкладку.
+static void scene_tick(App *app, float dt)
+{
+    if (!app->layout.scene) return;
+    // Записи jsonl — раз в полсекунды, а не раз в две: stat() на вкладку
+    // дёшев, а счёт после готового сообщения должен встать на место быстро.
+    static double last_ctx = 0;
+    double now = GetTime();
+    bool ctx_due = now - last_ctx >= 0.5;
+    if (ctx_due) last_ctx = now;
+    for (int i = 0; i < app->sessions.count; i++) {
+        Session *s = &app->sessions.items[i];
+        if (!session_has_term(s)) { s->scene_ready = false; continue; }
+        if (!s->scene_ready) {
+            scene_init(&s->scene);
+            s->scene_ready = true;
+            s->scene_bytes_seen = s->term.bytes_in;
+        }
+        if (ctx_due) session_track_ctx(s);
+        unsigned long seen = s->term.bytes_in;
+        scene_activity(&s->scene, seen - s->scene_bytes_seen, dt);
+        s->scene_bytes_seen = seen;
+        scene_score(&s->scene, s->tokens_out);
+        SceneMood before = s->scene.mood;
+        scene_set(&s->scene, scene_mood_for(s, s->scene.mood));
+        if (before == SCENE_FIGHT && s->scene.mood == SCENE_WIN) xp_fight(s->cwd);
+        scene_update(&s->scene, dt);
+    }
 }
 
 static int open_task(App *app, int project, const char *cwd,
@@ -437,6 +495,21 @@ static const char *parent_path_of(const App *app, const char *cwd)
 static void resume_command(const char *cwd, const char *sid, char *out, size_t cap);
 static void reload_projects(App *app);
 static void save_layout(App *app);
+
+// Отдать путь системе: папку — в Finder, файл — в редактор по умолчанию
+// (`open -t`). Двойной fork, чтобы не оставлять зомби: внука никто не ждёт.
+static void open_external(const char *target, bool edit) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            if (edit) execl("/usr/bin/open", "open", "-t", target, (char *)NULL);
+            else      execl("/usr/bin/open", "open", target, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0) waitpid(pid, NULL, 0);
+}
 
 // Папка, в которой живут проекты группы. У группы-папки это она сама; у
 // группы из projects.json — родитель её проектов (все они лежат рядом:
@@ -794,6 +867,31 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_journal_open = (s->page_journal_open == ev.arg + 1) ? 0 : ev.arg + 1;
         break;
 
+    case PAGE_EVENT_JOURNAL_DAY: {
+        // Перевернуть умолчание дня: уже перевёрнут — убрать из списка,
+        // иначе дописать; полный список теряет самое давнее.
+        int n = s->page_day_toggles;
+        int at = -1;
+        for (int i = 0; i < n; i++) if (s->page_day_keys[i] == ev.arg) at = i;
+        if (at >= 0) {
+            memmove(&s->page_day_keys[at], &s->page_day_keys[at + 1],
+                    sizeof(int) * (size_t)(n - at - 1));
+            s->page_day_toggles--;
+        } else {
+            if (n == PAGE_DAY_TOGGLES) {
+                memmove(&s->page_day_keys[0], &s->page_day_keys[1], sizeof(int) * (size_t)(n - 1));
+                n--;
+            }
+            s->page_day_keys[n] = ev.arg;
+            s->page_day_toggles = n + 1;
+        }
+        break;
+    }
+
+    case PAGE_EVENT_TODO_DONE_TOGGLE:
+        if (ev.sub + 1 >= 0 && ev.sub + 1 < 32) s->page_done_open ^= 1u << (ev.sub + 1);
+        break;
+
     case PAGE_EVENT_JOURNAL_MENTION: {
         // Вернуться к обсуждению — значит показать агенту, где оно лежит:
         // сессия, файл и метка времени в UTC, как в самом jsonl. Место он
@@ -852,6 +950,11 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         break;
     }
 
+    case PAGE_EVENT_OPEN_FOLDER:
+        open_external(s->cwd, false);
+        snprintf(s->page_notice, sizeof(s->page_notice), "Открыта в Finder: %s", s->cwd);
+        break;
+
     case PAGE_EVENT_SKILL_TOGGLE:
         s->page_skill_open = (s->page_skill_open == ev.arg + 1) ? 0 : ev.arg + 1;
         break;
@@ -867,16 +970,7 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
             bool edit = ev.kind == PAGE_EVENT_SKILL_EDIT;
             if (edit) snprintf(target, sizeof(target), "%s/SKILL.md", sl->items[i].path);
             else      snprintf(target, sizeof(target), "%s", sl->items[i].path);
-            pid_t pid = fork();
-            if (pid == 0) {
-                if (fork() == 0) {
-                    if (edit) execl("/usr/bin/open", "open", "-t", target, (char *)NULL);
-                    else      execl("/usr/bin/open", "open", target, (char *)NULL);
-                    _exit(127);
-                }
-                _exit(0);
-            }
-            if (pid > 0) waitpid(pid, NULL, 0);
+            open_external(target, edit);
             snprintf(s->page_notice, sizeof(s->page_notice), "%s", target);
             break;
         }
@@ -956,6 +1050,12 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
     case PAGE_EVENT_SET_DEFAULT_AGENT:
         snprintf(app->settings.default_agent, sizeof(app->settings.default_agent),
                  "%s", ev.text);
+        save_settings(app);
+        break;
+
+    case PAGE_EVENT_SET_MARKER:
+        snprintf(app->settings.marker, sizeof(app->settings.marker), "%s", ev.text);
+        app->layout.scene = settings_scene_enabled(&app->settings) && app->sprites.ready;
         save_settings(app);
         break;
 
@@ -1530,6 +1630,9 @@ int main(int argc, char **argv)
         if (v >= FONT_SIZE_MIN && v <= FONT_SIZE_MAX) font_size = v;
     }
 
+    if (!sprites_load(&app.sprites))
+        fprintf(stderr, "berth: атлас спрайтов не загрузился, сценки не будет\n");
+
     if (!font_load(&app.font, font_size, GetWindowScaleDPI())) {
         fprintf(stderr, "не удалось загрузить шрифт\n");
         CloseWindow();
@@ -1555,6 +1658,12 @@ int main(int argc, char **argv)
     layout_set_sidebar_width(&app.layout, app.settings.sidebar_width);
     if (!app.settings.sidebar_visible)
         layout_toggle_sidebar(&app.layout);
+    app.layout.scene = settings_scene_enabled(&app.settings) && app.sprites.ready;
+    {
+        char xp_path[PROJECT_PATH_MAX];
+        snprintf(xp_path, sizeof(xp_path), "%s/xp.tsv", config_dir());
+        xp_init(xp_path);
+    }
     layout_compute(&app.layout, &app.projects, &app.sessions,
                    GetScreenWidth(), GetScreenHeight());
 
@@ -1622,6 +1731,7 @@ int main(int argc, char **argv)
 
             // Задачи агент отмечает прямо в файле проекта — тем же опросом.
             projstate_poll();
+            xp_flush_maybe();
 
             // Состояние вкладок — из реестра Claude Code, тем же опросом:
             // по нему панель пишет «работает», «ждёт», «зовёт».
@@ -1746,6 +1856,8 @@ int main(int argc, char **argv)
         // EndDrawing — напрашиваться на неприятности.
         PageEvent page_event = { 0 };
 
+        scene_tick(&app, GetFrameTime());
+
         BeginDrawing();
         ClearBackground(app.theme.sidebar_bg);
 
@@ -1823,7 +1935,8 @@ int main(int argc, char **argv)
                         &app.font, &app.theme,
                         GetMousePosition(),
                         app.splitter_dragging
-                            || layout_hit_splitter(&app.layout, GetMousePosition()));
+                            || layout_hit_splitter(&app.layout, GetMousePosition()),
+                        app.layout.scene ? &app.sprites : NULL);
         // Полоса — последней: её балуны (подсказка к лимиту) висят поверх
         // всего, что ниже.
         ui_draw_topbar(&app.layout, &app.sessions, &app.usage, &app.font, &app.theme,
@@ -1841,6 +1954,7 @@ int main(int argc, char **argv)
     }
 
     save_layout(&app);
+    xp_flush();
     session_close_all(&app.sessions);
     font_unload(&app.font);
     CloseWindow();

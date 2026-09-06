@@ -24,6 +24,7 @@ typedef enum {
     PAGE_EVENT_START_AGENT,      // запустить агента во вкладке; text — его id
     PAGE_EVENT_RESUME_SESSION,   // продолжить сессию Claude; text — её id
     PAGE_EVENT_REFRESH,          // перечитать сведения о проекте
+    PAGE_EVENT_OPEN_FOLDER,      // открыть папку проекта в Finder
     PAGE_EVENT_HIDE_PAGE,        // спрятать страницу, вернуться к терминалу
     PAGE_EVENT_FONT_STEP,        // arg: +1, -1, 0 — сброс к умолчанию
     PAGE_EVENT_TOGGLE_SIDEBAR,
@@ -33,11 +34,13 @@ typedef enum {
     PAGE_EVENT_SET_THEME_PANEL,  // text — имя темы
     PAGE_EVENT_SET_THEME_WINDOW,   // text — имя темы или project
     PAGE_EVENT_TOGGLE_COLLAPSED_LIVE, // свёрнутая группа: показывать ли открытые
+    PAGE_EVENT_SET_MARKER,       // маркер активного разговора; text — dot или karateka
     PAGE_EVENT_UNHIDE_GROUP,     // вернуть скрытую группу; text — её имя
     PAGE_EVENT_TOGGLE_USAGE_FETCH, // лимиты: свой запрос или только кэш
     PAGE_EVENT_TOGGLE_BERTH_SKILL, // скилл берта включить/выключить; text — имя
     PAGE_EVENT_JOURNAL_TOGGLE,   // раскрыть или свернуть запись журнала; arg — номер
     PAGE_EVENT_JOURNAL_MENTION,  // упомянуть запись в разговоре проекта; arg — номер
+    PAGE_EVENT_JOURNAL_DAY,      // свернуть или раскрыть день ленты; arg — ключ дня
     PAGE_EVENT_BUILD_JOURNAL,    // собрать журнал проекта скиллом
     PAGE_EVENT_BUILD_SUMMARY,    // написать сводку проекта скиллом
     PAGE_EVENT_SHOW_TASK,        // показать фоновую задачу; arg — её вкладка
@@ -61,6 +64,7 @@ typedef enum {
 
     // Задачи проекта из .berth/tasks.md. arg — номер задачи в списке.
     PAGE_EVENT_TODO_TOGGLE,      // раскрыть или свернуть описание
+    PAGE_EVENT_TODO_DONE_TOGGLE, // показать или спрятать сделанные задачи списка
     PAGE_EVENT_TODO_MOVE,        // переставить: с места arg на место arg2
     PAGE_EVENT_TODO_SEND,        // отправить в разговор проекта
     PAGE_EVENT_TODO_STATE,       // перевести в состояние arg2 (TaskState)

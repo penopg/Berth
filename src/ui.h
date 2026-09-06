@@ -13,6 +13,7 @@
 #include "projects.h"
 #include "theme.h"
 #include "font.h"
+#include "scene.h"
 
 // Текст с обрезкой по ширине и многоточием. Живёт здесь, потому что так же
 // рисуются и панель, и страницы: обрыв UTF-8 на середине символа даёт мусор
@@ -36,6 +37,7 @@ void ui_draw_topbar(const Layout *l, const SessionList *sessions,
 void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
                      const SessionList *sessions,
                      const FontAtlas *font, const Theme *theme,
-                     Vector2 mouse, bool splitter_active);
+                     Vector2 mouse, bool splitter_active,
+                     const Sprites *sprites);   // NULL — сценки выключены
 
 #endif // BERTH_UI_H

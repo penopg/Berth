@@ -17,6 +17,7 @@ typedef struct {
     bool    click;      // левая кнопка нажата именно в этом кадре
 
     int x, y;           // курсор вывода
+    int col_w;          // ширина колонки: страница бывает в две колонки
     int row_x;          // курсор внутри ряда кнопок
     int row_home;       // куда переносится ряд, когда не влезает
     bool row_used;      // в ряду уже есть кнопка
@@ -49,6 +50,7 @@ static Ctx ctx_begin(const FontAtlas *font, const Theme *theme,
         .click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
         .x = view.x + PAD_X,
         .y = view.y + PAD_Y,
+        .col_w = view.w - PAD_X * 2,
         .line = font->cell_height + 4,
         .scroll = scroll,
         .list_sub = -1,
@@ -83,7 +85,21 @@ static int ctx_end(const Ctx *c)
 
 static int content_width(const Ctx *c)
 {
-    return c->view.w - PAD_X * 2;
+    return c->col_w;
+}
+
+// Сколько знакомест займёт подпись: ширина кнопки и ссылки считается по ней.
+static int chars_of(const char *label)
+{
+    int chars = 0;
+    for (const char *p = label; *p; ) {
+        int size = 0;
+        GetCodepointNext(p, &size);
+        if (size <= 0) break;
+        p += size;
+        chars++;
+    }
+    return chars;
 }
 
 static void text(Ctx *c, const char *s, Color color)
@@ -160,14 +176,7 @@ static void row_end(Ctx *c)
 
 static bool button(Ctx *c, const char *label, bool accent)
 {
-    int chars = 0;
-    for (const char *p = label; *p; ) {
-        int size = 0;
-        GetCodepointNext(p, &size);
-        if (size <= 0) break;
-        p += size;
-        chars++;
-    }
+    int chars = chars_of(label);
 
     Rect r = {
         .x = c->row_x,
@@ -178,7 +187,7 @@ static bool button(Ctx *c, const char *label, bool accent)
     // Ряд не влезает — переносим кнопку на следующую строку, в ту же
     // колонку, где ряд начался: у настройки это колонка после подписи.
     int home = c->row_home ? c->row_home : c->x;
-    if (r.x + r.w > c->view.x + c->view.w - PAD_X && c->row_x > home) {
+    if (r.x + r.w > c->x + content_width(c) && c->row_x > home) {
         c->y += r.h + 8;
         c->row_x = home;
         r.x = home;
@@ -190,7 +199,7 @@ static bool button(Ctx *c, const char *label, bool accent)
     Color bg = hover ? c->theme->row_hover_bg : c->theme->row_active_bg;
     DrawRectangle(r.x, r.y, r.w, r.h, bg);
     if (accent)
-        DrawRectangle(r.x, r.y, 3, r.h, c->theme->group_label);
+        DrawRectangle(r.x, r.y, 3, r.h, c->theme->progress_fill);
 
     ui_text_clipped(c->font, label, r.x + 12, r.y + 6,
                     accent ? c->theme->row_text : c->theme->row_text_dim,
@@ -208,6 +217,65 @@ static bool visible_hit(const Ctx *c, Vector2 p)
 {
     if (!c->scroll_top) return true;   // прокрутка ещё не началась
     return p.y >= c->scroll_top && p.y < c->view.y + c->view.h;
+}
+
+// Заголовок раздела с действием у правого края: «Сводка … Обновить».
+// Действие живёт рядом с тем, на что действует, а не в общем ряду кнопок
+// сверху, где «Обновить сводку» и «Собрать журнал» стояли без контекста.
+// Возвращает true, если по действию нажали.
+static bool section_action(Ctx *c, const char *title, const char *action)
+{
+    gap(c, 2);
+    int w = content_width(c);
+    bool hit = false;
+    int title_w = w;
+    if (action) {
+        int aw = chars_of(action) * c->font->cell_width;
+        Rect r = { c->x + w - aw - 8, c->y - 3, aw + 16, c->line + 2 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+        ui_text_clipped(c->font, action, r.x + 8, c->y,
+                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
+        hit = hover && c->click;
+        title_w = w - aw - 24;
+    }
+    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label, title_w);
+    c->y += c->line;
+    DrawRectangle(c->x, c->y - 3, w, 1, c->theme->sidebar_border);
+    gap(c, 1);
+    return hit;
+}
+
+// Складная строка внутри раздела: стрелка ▸/▾, заголовок и приглушённая
+// приписка. Ею сворачиваются дни ленты и сделанные задачи — то, чего со
+// временем становится больше, чем нужно видеть разом.
+static bool fold_row(Ctx *c, const char *title, const char *note, bool open,
+                     Color title_color)
+{
+    Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 4 };
+    bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+    if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+    font_draw_codepoint(c->font, open ? 0x25BE : 0x25B8, (float)c->x, (float)c->y,
+                        (float)c->font->size, c->theme->group_label);
+    int x = c->x + c->font->cell_width * 2;
+    int w = ui_text_clipped(c->font, title, x, c->y, title_color,
+                            content_width(c) - c->font->cell_width * 2);
+    if (note && *note)
+        ui_text_clipped(c->font, note, x + w + c->font->cell_width, c->y,
+                        c->theme->row_text_dim,
+                        c->x + content_width(c) - (x + w + c->font->cell_width));
+    c->y += c->line + 2;
+    return hover && c->click;
+}
+
+// Русский счёт по трём формам: один итог, два итога, пять итогов.
+static const char *plural3(int n, const char *one, const char *few, const char *many)
+{
+    int a = n % 10, b = n % 100;
+    if (b >= 11 && b <= 14) return many;
+    if (a == 1) return one;
+    if (a >= 2 && a <= 4) return few;
+    return many;
 }
 
 // Русский счёт: один разговор, два разговора, пять разговоров.
@@ -841,27 +909,42 @@ static Rect task_row(Ctx *c, const Task *task, int number, bool open, bool place
 
     if (placeholder) {
         DrawRectangleLines(r.x, r.y, r.w, r.h, c->theme->sidebar_border);
-    } else {
-        if (hover || open)
-            DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        char label[TASK_TITLE_MAX + 16];
-        task_label(label, sizeof(label), task, number);
-        int width = content_width(c);
-        if (task->state == TASK_REVIEW) {
-            // Пометка справа, тем же цветом, что «агент зовёт»: задача ждёт
-            // человека, а не агента.
-            const char *hint = "проверить";
-            int hint_w = c->font->cell_width * 9;
-            ui_text_clipped(c->font, hint, c->x + width - hint_w, c->y,
-                            c->theme->badge_attention, hint_w);
-            width -= hint_w + c->font->cell_width;
-        }
-        ui_text_clipped(c->font, label, c->x, c->y,
-                        task->state == TASK_DONE ? c->theme->row_text_dim
-                                                 : c->theme->row_text,
-                        width);
+        c->y += c->line + 6;
+        return r;
     }
-    c->y += c->line + 6;
+
+    char label[TASK_TITLE_MAX + 16];
+    task_label(label, sizeof(label), task, number);
+    int width = content_width(c);
+    int hint_w = 0;
+    if (task->state == TASK_REVIEW) {
+        hint_w = c->font->cell_width * 9;
+        width -= hint_w + c->font->cell_width;
+    }
+    Color tone = task->state == TASK_DONE ? c->theme->row_text_dim : c->theme->row_text;
+
+    // Свёрнутая строка — одной строкой, длинное обрезается: список должен
+    // оставаться списком. Раскрытая показывает название целиком, с
+    // переносом: в узкой колонке половина названий не влезала, а клик —
+    // это как раз просьба прочесть.
+    int lines = open ? draw_wrapped(c, label, 0, width, tone, false) : 1;
+    if (lines < 1) lines = 1;
+    r.h = c->line * lines + 6;
+
+    if (hover || open)
+        DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+    if (hint_w) {
+        // Пометка справа, тем же цветом, что «агент зовёт»: задача ждёт
+        // человека, а не агента.
+        ui_text_clipped(c->font, "проверить", c->x + content_width(c) - hint_w, c->y,
+                        c->theme->badge_attention, hint_w);
+    }
+    if (open) draw_wrapped(c, label, c->x, width, tone, true);
+    else {
+        ui_text_clipped(c->font, label, c->x, c->y, tone, width);
+        c->y += c->line;
+    }
+    c->y += 6;
     return r;
 }
 
@@ -1132,13 +1215,21 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
         row_end(c);
     }
 
-    // Сделанные: их немного и они не мешают, но убирать с глаз нельзя —
-    // иначе не вернуть, если отметили сгоряча.
-    bool first_done = true;
-    for (int i = 0; i < tl->count; i++) {
+    // Сделанные — под складной строкой, по умолчанию свёрнуты: их со
+    // временем больше, чем открытых, и они не про работу. Совсем убирать
+    // нельзя — иначе не вернуть, если отметили сгоряча.
+    int done_n = tasks_count_in(tl, TASK_DONE);
+    bool show_done = done_n > 0 && ((s->page_done_open >> (sub + 1)) & 1u);
+    if (done_n > 0) {
+        gap(c, 1);
+        char head[48];
+        snprintf(head, sizeof(head), "Сделано · %d", done_n);
+        if (fold_row(c, head, NULL, show_done, c->theme->row_text_dim))
+            set_event(c, PAGE_EVENT_TODO_DONE_TOGGLE, 0, NULL);
+    }
+    for (int i = 0; show_done && i < tl->count; i++) {
         const Task *task = &tl->items[i];
         if (task->state != TASK_DONE) continue;
-        if (first_done) { gap(c, 1); first_done = false; }
 
         bool open = open_idx == i;
         Rect r = task_row(c, task, 0, open, false);
@@ -1317,6 +1408,232 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
     body_text(c, foot, 0, c->theme->row_text_dim);
 }
 
+// Сводка — первое, что видно: что это за проект, где он сейчас и что
+// дальше. Её пишет агент по паспорту, коду и истории, поэтому она есть и
+// там, где CLAUDE.md не заводили. Пока сводки нет, показываем статус из
+// паспорта — это хоть какой-то ориентир, но он про последние действия, а
+// за ними лучше идти в журнал. Действие «Собрать»/«Обновить» — в заголовке.
+static void draw_summary(Ctx *c, const ProjInfo *info)
+{
+    const Theme *theme = c->theme;
+    if (info->has_summary) {
+        char age[48], head[96];
+        projinfo_age(info->summary_mtime, age, sizeof(age));
+        snprintf(head, sizeof(head), "Сводка · %s", age);
+        if (section_action(c, head, "Обновить сводку"))
+            set_event(c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
+        c->y -= c->line / 2;   // абзацы отбиваются сами
+
+        // Три абзаца с подписями «Что это», «Где сейчас», «Дальше». Подпись
+        // — отдельной строкой цветом заголовка: три вопроса должны
+        // находиться глазом, а не вычитываться из начала абзаца.
+        static const char *labels[] = { "Что это:", "Где сейчас:", "Дальше:" };
+        char para[PROJINFO_SUMMARY_MAX];
+        size_t used = 0;
+        const char *p = info->summary;
+        for (;;) {
+            const char *nl = strchr(p, '\n');
+            size_t n = nl ? (size_t)(nl - p) : strlen(p);
+            bool blank = n == 0;
+            if (!blank && used + n + 1 < sizeof(para)) {
+                if (used) para[used++] = ' ';
+                memcpy(para + used, p, n);
+                used += n;
+            }
+            if ((blank || !nl) && used) {
+                para[used] = '\0';
+                const char *body = para;
+                for (size_t k = 0; k < sizeof(labels) / sizeof(labels[0]); k++) {
+                    size_t ln = strlen(labels[k]);
+                    if (strncmp(para, labels[k], ln)) continue;
+                    char label[32];
+                    snprintf(label, sizeof(label), "%.*s", (int)ln - 1, labels[k]);
+                    gap(c, 1);
+                    text(c, label, theme->group_label);
+                    body = para + ln;
+                    while (*body == ' ') body++;
+                    break;
+                }
+                if (body == para) gap(c, 1);
+                draw_wrapped(c, body, c->x, content_width(c), theme->row_text, true);
+                used = 0;
+            }
+            if (!nl) break;
+            p = nl + 1;
+        }
+    } else if (info->status_lines > 0) {
+        if (section_action(c, info->has_claude_md ? "Статус · CLAUDE.md" : "Статус",
+                           "Собрать сводку"))
+            set_event(c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
+        int status_max = info->status_lines < 4 ? info->status_lines : 4;
+        for (int i = 0; i < status_max; i++)
+            text(c, info->status[i], theme->row_text_dim);
+        text(c, "Сводки ещё нет — её соберёт действие в заголовке", theme->row_text_dim);
+    } else {
+        if (section_action(c, "Сводка", "Собрать сводку"))
+            set_event(c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
+        text(c, info->has_claude_md
+             ? "Сводки ещё нет — её соберёт действие в заголовке"
+             : "CLAUDE.md нет, сводки нет — «Собрать сводку» восстановит её из истории",
+             theme->row_text_dim);
+    }
+}
+
+// Ключ дня для сворачивания: год и номер дня, по местному времени. Не номер
+// дня в ленте — новый день сдвинул бы номера, и свёрнутое поехало бы.
+static int day_key(time_t when)
+{
+    struct tm t;
+    localtime_r(&when, &t);
+    return t.tm_year * 400 + t.tm_yday;
+}
+
+// Раскрыт ли день: два свежих — да, остальные — нет, если человек не
+// перевернул умолчание кликом. rank — номер дня от свежего, 0 — свежий.
+static bool day_open(const Session *s, int key, int rank)
+{
+    bool open = rank < 2;
+    for (int i = 0; i < s->page_day_toggles; i++)
+        if (s->page_day_keys[i] == key) open = !open;
+    return open;
+}
+
+// Журнал: что здесь происходило, по времени. Сессии в него не выносятся —
+// компакт и форк режут один разговор на файлы, и для человека эти границы
+// ничего не значат. Значат — дни, часы и то, о чём он тогда просил. Дни
+// складные: у живого проекта лента на сотни строк, а нужен обычно вчерашний
+// и сегодняшний; остальные стоят заголовками со счётом.
+static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const ProjInfo *info)
+{
+    const Theme *theme = c->theme;
+    const FontAtlas *font = c->font;
+
+    int recaps = 0, days = 0, last_key = -1;
+    for (int i = 0; i < jr->count; i++) {
+        const JournalEvent *ev = &jr->events[i];
+        if (ev->kind == JOURNAL_MOVED) continue;
+        if (ev->kind == JOURNAL_RECAP) recaps++;
+        int key = day_key(ev->when);
+        if (key != last_key) { days++; last_key = key; }
+    }
+
+    // Журнал пишет не берт, а агент: он читает историю проекта и складывает
+    // итоги работы в .berth/journal.md. Действие открывает для этого свою
+    // вкладку, чтобы не мешать тому, что идёт в текущей.
+    char head[64];
+    if (days > 0) snprintf(head, sizeof(head), "Журнал работы · %d %s", days,
+                           plural3(days, "день", "дня", "дней"));
+    else          snprintf(head, sizeof(head), "Журнал работы");
+    if (section_action(c, head, recaps > 0 ? "Обновить журнал" : "Собрать журнал"))
+        set_event(c, PAGE_EVENT_BUILD_JOURNAL, 0, NULL);
+
+    if (jr->count == 0) {
+        text(c, "Здесь ещё не работали", theme->row_text_dim);
+        return;
+    }
+
+    // Рисуем ленту целиком: страница прокручивается, и обрезать её по
+    // высоте окна больше незачем — колесом человек уходит в любой день.
+    if (jr->partial)
+        text(c, "…более раннее в ленту не поместилось", theme->row_text_dim);
+
+    int time_w = font->cell_width * 8;
+    last_key = -1;
+    int day_idx = 0;
+    bool cur_open = true;
+    for (int i = 0; i < jr->count; i++) {
+        const JournalEvent *ev = &jr->events[i];
+        if (ev->kind == JOURNAL_MOVED) continue;
+
+        // День — складной строкой, а не датой у каждой записи: подряд идущие
+        // события одного дня читаются как один кусок работы. В приписке —
+        // сколько за день итогов и реплик: по свёрнутому дню видно, был ли
+        // он пустым.
+        int key = day_key(ev->when);
+        if (key != last_key) {
+            last_key = key;
+            int d_recaps = 0, d_said = 0;
+            for (int j = i; j < jr->count; j++) {
+                const JournalEvent *e = &jr->events[j];
+                if (e->kind == JOURNAL_MOVED) continue;
+                if (day_key(e->when) != key) break;
+                if (e->kind == JOURNAL_RECAP) d_recaps++;
+                else if (e->kind != JOURNAL_COMPACT) d_said++;
+            }
+            int rank = days - 1 - day_idx++;
+            cur_open = day_open(s, key, rank);
+
+            char day[48], note[96] = "";
+            journal_day(ev->when, day, sizeof(day));
+            if (d_recaps && d_said)
+                snprintf(note, sizeof(note), "%d %s · %d %s",
+                         d_recaps, plural3(d_recaps, "итог", "итога", "итогов"),
+                         d_said, plural3(d_said, "реплика", "реплики", "реплик"));
+            else if (d_recaps)
+                snprintf(note, sizeof(note), "%d %s", d_recaps,
+                         plural3(d_recaps, "итог", "итога", "итогов"));
+            else if (d_said)
+                snprintf(note, sizeof(note), "%d %s", d_said,
+                         plural3(d_said, "реплика", "реплики", "реплик"));
+            gap(c, 1);
+            if (fold_row(c, day, note, cur_open, theme->row_text))
+                set_event(c, PAGE_EVENT_JOURNAL_DAY, key, NULL);
+        }
+        if (!cur_open) continue;
+
+        char stamp[16];
+        journal_clock(ev->when, stamp, sizeof(stamp));
+
+        if (ev->kind == JOURNAL_COMPACT) {
+            char note[64];
+            // Ширина под время та же, что у строк ленты: шов должен стоять
+            // в общей колонке, а не гулять по строке.
+            snprintf(note, sizeof(note), "%-11s сжатие контекста", stamp);
+            text(c, note, theme->row_text_dim);
+            continue;
+        }
+
+        // Итог работы — то, ради чего сюда и приходят: он идёт в полную
+        // силу, а реплики человека остаются приглушённым фоном. Реплика
+        // это начало задачи, итог — чем она кончилась.
+        Color tone = ev->kind == JOURNAL_RECAP ? theme->row_text : theme->row_text_dim;
+        int row_top = c->y;
+        bool hit = list_row_colored(c, stamp, ev->text, time_w, tone);
+
+        // Расшифровка идёт под сутью, с отступом в ту же колонку: строка
+        // читается как «время — что сделали», а под ней подробность.
+        if (ev->detail[0])
+            draw_wrapped(c, ev->detail, c->x + time_w,
+                         content_width(c) - time_w, theme->row_text_dim, true);
+
+        // Клик раскрывает запись, а не поднимает старую сессию: разговор
+        // у проекта один, и вернуться к обсуждению значит напомнить о нём
+        // агенту в этом разговоре, а не открыть второй.
+        if (hit)
+            set_event(c, PAGE_EVENT_JOURNAL_TOGGLE, i, NULL);
+
+        if (s->page_journal_open == i + 1) {
+            row_begin(c);
+            c->row_x += time_w;
+            if (button(c, "Упомянуть в текущем разговоре", true))
+                set_event(c, PAGE_EVENT_JOURNAL_MENTION, i, NULL);
+            row_end(c);
+            reveal_task_once(c, s->cwd, -2, i, row_top);
+        }
+    }
+
+    gap(c, 1);
+    char note[200];
+    int live = info->session_busy + info->session_empty;
+    if (recaps > 0)
+        snprintf(note, sizeof(note), "%d %s работы · %d %s · клик по дню сворачивает его",
+                 recaps, plural3(recaps, "итог", "итога", "итогов"),
+                 live, plural_talks(live));
+    else
+        snprintf(note, sizeof(note), "итогов работы нет — их пишет «Собрать журнал» в заголовке");
+    text(c, note, theme->row_text_dim);
+}
+
 PageEvent page_draw_project(const Session *s, const ProjectState *st,
                             const SessionList *sessions,
                             const ProjectList *projects,
@@ -1331,20 +1648,40 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 
     text(&c, s->name, theme->row_text);
 
-    char line[700];
-    if (info->branch[0])
-        snprintf(line, sizeof(line), "%s  ·  %s%s", info->cwd,
-                 info->detached ? "HEAD " : "", info->branch);
-    else
-        snprintf(line, sizeof(line), "%s", info->cwd);
-    text(&c, line, theme->row_text_dim);
+    // Путь, значок папки и ветка — одной строкой. Папка открывается по
+    // значку рядом с путём, а не кнопкой в общем ряду: действие стоит у
+    // своего предмета. Ветка — акцентным цветом: это единственное здесь, что
+    // меняется от работы, и глаз должен находить её без чтения строки.
+    {
+        int x = c.x;
+        int branch_room = info->branch[0] ? font->cell_width * 24 : font->cell_width * 4;
+        int w = ui_text_clipped(font, info->cwd, x, c.y, theme->row_text_dim,
+                                content_width(&c) - branch_room);
+        x += w + font->cell_width;
+        Rect ir = { x - 4, c.y - 2, font->cell_width * 2 + 8, c.line + 4 };
+        bool ih = inside(ir, c.mouse);
+        if (ih) DrawRectangle(ir.x, ir.y, ir.w, ir.h, theme->row_hover_bg);
+        font_draw_codepoint(font, 0xEA83, (float)x, (float)c.y, (float)font->size,
+                            ih ? theme->row_text : theme->row_text_dim);
+        if (ih && c.click) set_event(&c, PAGE_EVENT_OPEN_FOLDER, 0, NULL);
+        x += font->cell_width * 3;
+        if (info->branch[0]) {
+            char br[300];
+            snprintf(br, sizeof(br), "%s%s", info->detached ? "HEAD " : "", info->branch);
+            font_draw_codepoint(font, 0xE0A0, (float)x, (float)c.y, (float)font->size,
+                                theme->progress_fill);
+            x += font->cell_width * 2;
+            ui_text_clipped(font, br, x, c.y, theme->progress_fill,
+                            c.x + content_width(&c) - x);
+        }
+        c.y += c.line;
+    }
 
     gap(&c, 2);
 
-    // Первой идёт кнопка, ради которой страницу и открывают. Что на ней
-    // написано, зависит от того, работает ли уже агент в этой вкладке:
-    // страницу можно открыть и поверх живой сессии, чтобы посмотреть на
-    // проект, — тогда возвращаться некуда, кроме как обратно к работе.
+    // В ряду только то, ради чего страницу открывают: вернуться к работе
+    // или начать её. Сбор сводки и журнала ушли в заголовки своих разделов,
+    // «Обновить» не нужно — страница перечитывает файлы сама.
     row_begin(&c);
     bool running = session_has_term(s);
     bool has_history = info->session_count > 0;
@@ -1358,15 +1695,6 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
         if (button(&c, "Оболочка", false))
             set_event(&c, PAGE_EVENT_START_AGENT, 0, "shell");
     }
-    if (button(&c, "Обновить", false))
-        set_event(&c, PAGE_EVENT_REFRESH, 0, NULL);
-    // Журнал пишет не берт, а агент: он читает историю проекта и складывает
-    // итоги работы в .berth/journal.md. Кнопка открывает для этого свою
-    // вкладку, чтобы не мешать тому, что идёт в текущей.
-    if (button(&c, "Собрать журнал", false))
-        set_event(&c, PAGE_EVENT_BUILD_JOURNAL, 0, NULL);
-    if (button(&c, info->has_summary ? "Обновить сводку" : "Собрать сводку", false))
-        set_event(&c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
     row_end(&c);
 
     // Ответ на последнее действие. Кнопка, которая молчит, читается как
@@ -1390,12 +1718,19 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
         }
 
         row_begin(&c);
-        char label[96];
         const char *state = session_task_state_text(t);
-        snprintf(label, sizeof(label), "%s · %s", t->name, state);
-        ui_text_clipped(font, label, c.row_x, c.y + 6, theme->row_text,
-                        font->cell_width * 26);
-        c.row_x += font->cell_width * 28;
+        // Состояние — цветом: работа синим, падение красным, остальное
+        // приглушённо. Слово одно и то же читается по-разному.
+        bool dead = t->state == SESSION_STATE_DEAD;
+        Color tone = !session_has_term(t) ? theme->row_text_dim
+                   : !dead                ? theme->progress_fill
+                   : (t->term.child_reaped && t->term.child_status != 0)
+                                          ? theme->badge_dead : theme->row_text_dim;
+        int nw = ui_text_clipped(font, t->name, c.row_x, c.y + 6, theme->row_text,
+                                 font->cell_width * 18);
+        ui_text_clipped(font, state, c.row_x + nw + font->cell_width, c.y + 6, tone,
+                        font->cell_width * 28 - nw - font->cell_width);
+        c.row_x += font->cell_width * 30;
 
         if (button(&c, "Показать", false))
             set_event(&c, PAGE_EVENT_SHOW_TASK, i, NULL);
@@ -1407,122 +1742,31 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     gap(&c, 1);
     scroll_begin(&c);
 
-    // Сводка — первое, что видно: что это за проект, где он сейчас и что
-    // дальше. Её пишет агент по паспорту, коду и истории, поэтому она есть и
-    // там, где CLAUDE.md не заводили. Пока сводки нет, показываем статус из
-    // паспорта — это хоть какой-то ориентир, но он про последние действия, а
-    // за ними лучше идти в журнал.
-    if (info->has_summary) {
-        char age[48], head[96];
-        projinfo_age(info->summary_mtime, age, sizeof(age));
-        snprintf(head, sizeof(head), "Сводка · %s", age);
-        section(&c, head);
-        c.y -= c.line / 2;   // body_text сам отбивает абзацы
-        body_text(&c, info->summary, 0, theme->row_text);
-    } else if (info->status_lines > 0) {
-        section(&c, info->has_claude_md ? "Статус · CLAUDE.md" : "Статус");
-        int status_max = info->status_lines < 4 ? info->status_lines : 4;
-        for (int i = 0; i < status_max; i++)
-            text(&c, info->status[i], theme->row_text_dim);
-        text(&c, "Сводки ещё нет — её пишет кнопка «Собрать сводку»", theme->row_text_dim);
-    } else {
-        section(&c, "Сводка");
-        text(&c, info->has_claude_md
-             ? "Сводки ещё нет — её пишет кнопка «Собрать сводку»"
-             : "CLAUDE.md нет, сводки нет — «Собрать сводку» восстановит её из истории",
-             theme->row_text_dim);
+    // Две колонки, если ширина позволяет: слева то, что было, — сводка и
+    // журнал, — справа то, что будет, — задачи, подпроекты, скиллы. Окно
+    // проекта занимает три четверти экрана, и линейная лента на такой
+    // ширине оставляла половину пустой, а задачи уезжали за журнал вниз.
+    // Прокрутка одна на обе колонки: страница остаётся одним листом.
+    int full = content_width(&c);
+    bool wide = full >= font->cell_width * 110;
+    int gutter = font->cell_width * 4;
+    int top = c.y;
+    int left_x = c.x;
+    int left_w = wide ? (full - gutter) * 3 / 5 : full;
+    int right_x = left_x + left_w + gutter;
+    int right_w = full - left_w - gutter;
+    c.col_w = left_w;
+
+    draw_summary(&c, info);
+    draw_journal(&c, s, &st->journal, info);
+
+    int left_end = c.y;
+    if (wide) {
+        c.x = right_x;
+        c.col_w = right_w;
+        c.y = top;
     }
 
-    // Журнал: что здесь происходило, по времени. Сессии в него не выносятся —
-    // компакт и форк режут один разговор на файлы, и для человека эти границы
-    // ничего не значат. Значат — дни, часы и то, о чём он тогда просил.
-    const Journal *jr = &st->journal;
-    if (jr->count > 0) {
-        section(&c, "Журнал работы");
-
-        // Рисуем ленту целиком: страница прокручивается, и обрезать её по
-        // высоте окна больше незачем — колесом человек уходит в любой день.
-        if (jr->partial)
-            text(&c, "…более раннее в ленту не поместилось", theme->row_text_dim);
-
-        int time_w = font->cell_width * 8;
-        char last_day[48] = "";
-        for (int i = 0; i < jr->count; i++) {
-            const JournalEvent *ev = &jr->events[i];
-            if (ev->kind == JOURNAL_MOVED) continue;
-
-            // День отбивается заголовком, а не датой у каждой строки: подряд
-            // идущие события одного дня читаются как один кусок работы.
-            char day[48], stamp[16];
-            journal_day(ev->when, day, sizeof(day));
-            journal_clock(ev->when, stamp, sizeof(stamp));
-            if (strcmp(day, last_day)) {
-                snprintf(last_day, sizeof(last_day), "%s", day);
-                gap(&c, 1);
-                text(&c, day, theme->row_text_dim);
-            }
-
-            if (ev->kind == JOURNAL_COMPACT) {
-                char note[64];
-                // Ширина под время та же, что у строк ленты: шов должен
-                // стоять в общей колонке, а не гулять по строке.
-                snprintf(note, sizeof(note), "%-11s сжатие контекста", stamp);
-                text(&c, note, theme->row_text_dim);
-                continue;
-            }
-
-            // Итог работы — то, ради чего сюда и приходят: он идёт в полную
-            // силу, а реплики человека остаются приглушённым фоном. Реплика
-            // это начало задачи, итог — чем она кончилась.
-            Color tone = ev->kind == JOURNAL_RECAP ? theme->row_text
-                                                   : theme->row_text_dim;
-            int row_top = c.y;
-            bool hit = list_row_colored(&c, stamp, ev->text, time_w, tone);
-
-            // Расшифровка идёт под сутью, с отступом в ту же колонку: строка
-            // читается как «время — что сделали», а под ней подробность.
-            if (ev->detail[0])
-                draw_wrapped(&c, ev->detail, c.x + time_w,
-                             content_width(&c) - time_w, theme->row_text_dim, true);
-
-            // Клик раскрывает запись, а не поднимает старую сессию: разговор
-            // у проекта один, и вернуться к обсуждению значит напомнить о
-            // нём агенту в этом разговоре, а не открыть второй.
-            if (hit)
-                set_event(&c, PAGE_EVENT_JOURNAL_TOGGLE, i, NULL);
-
-            if (s->page_journal_open == i + 1) {
-                row_begin(&c);
-                c.row_x += time_w;
-                if (button(&c, "Упомянуть в текущем разговоре", true))
-                    set_event(&c, PAGE_EVENT_JOURNAL_MENTION, i, NULL);
-                row_end(&c);
-                reveal_task_once(&c, s->cwd, -2, i, row_top);
-            }
-        }
-
-        gap(&c, 1);
-        char note[200];
-        int live = info->session_busy + info->session_empty;
-        int recaps = 0;
-        for (int i = 0; i < jr->count; i++)
-            if (jr->events[i].kind == JOURNAL_RECAP) recaps++;
-        if (recaps > 0)
-            snprintf(note, sizeof(note),
-                     "%d %s работы · %d %s · клик продолжит разговор",
-                     recaps, recaps == 1 ? "итог" : "итогов",
-                     live, plural_talks(live));
-        else
-            snprintf(note, sizeof(note),
-                     "итогов работы нет — их пишет кнопка «Собрать журнал»");
-        text(&c, note, theme->row_text_dim);
-    } else {
-        section(&c, "Журнал работы");
-        text(&c, "Здесь ещё не работали", theme->row_text_dim);
-    }
-
-    // Задачи — после журнала: журнал про то, что было, задачи про то, что
-    // будет, и страница открывается на свежем конце — там они и видны.
     // Редактор чужой страницы закрываем: он про свой каталог. Свой — это
     // каталог проекта или одного из его подпроектов.
     if (g_edit.active && !g_edit.project && strcmp(g_edit.cwd, s->cwd)) {
@@ -1544,8 +1788,20 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     draw_subprojects(&c, s, projects);
 
     // Скиллы — последними: это оснастка проекта, к ней ходят реже, чем к
-    // задачам, а страница открывается на конце, и они всё равно на виду.
+    // задачам.
     draw_skills(&c, s, projects);
+
+    if (wide) {
+        int end = c.y > left_end ? c.y : left_end;
+        // Разделитель между колонками — от верха прокручиваемой части до
+        // нижней из двух. Рисуется после содержимого: высота известна только
+        // теперь.
+        DrawRectangle(right_x - gutter / 2, top + c.line, 1, end - top - c.line,
+                      theme->sidebar_border);
+        c.x = left_x;
+        c.col_w = full;
+        c.y = end;
+    }
 
     c.event.scroll_top = c.scroll_top;
     c.event.overflow = ctx_end(&c);
@@ -1720,6 +1976,17 @@ PageEvent page_draw_settings(const Settings *st, const Groups *groups,
     if (button(&c, st->collapsed_show_live ? "показывает открытые проекты"
                                            : "прячет всё", true))
         set_event(&c, PAGE_EVENT_TOGGLE_COLLAPSED_LIVE, 0, NULL);
+    setting_end(&c);
+
+    setting_begin(&c, "Активный разговор");
+    {
+        bool karateka = !strcmp(st->marker, "karateka");
+        if (button(&c, "точка", !karateka)) set_event(&c, PAGE_EVENT_SET_MARKER, 0, "dot");
+        if (button(&c, "каратека", karateka)) set_event(&c, PAGE_EVENT_SET_MARKER, 0, "karateka");
+    }
+    setting_note(&c, "Сценка в строке активного разговора: стойка, бой, пока агент "
+                     "работает, победа, когда закончил, поклон, когда зовёт. "
+                     "Переменная BERTH_MARKER=karateka включает её для одного запуска.");
     setting_end(&c);
 
     // Скрытые группы возвращаются только отсюда: в панели их нет, и клик

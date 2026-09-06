@@ -66,7 +66,14 @@ typedef struct {
     // была за последние resume_within часов; остальные встают страницами,
     // и разговор продолжается по кнопке тем же id. 0 — поднимать все.
     int resume_within;
+
+    // Маркер живого разговора в панели: karateka (по умолчанию) — сценка с
+    // каратекой: бой, пока агент работает, победа, поклон, когда зовёт;
+    // dot — точка и квадратик. Переменная BERTH_MARKER перекрывает.
+    char marker[16];
 } Settings;
+
+bool settings_scene_enabled(const Settings *s);
 
 // Включён ли скилл берта с таким именем; и переключить.
 bool settings_skill_enabled(const Settings *s, const char *name);

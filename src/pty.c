@@ -150,8 +150,10 @@ void pty_write(int pty_fd, const char *buf, size_t len)
 // пуст в этот момент, а не что процесс закончил вывод. Выход по первому EAGAIN
 // давал ~8 КБ за кадр, то есть потолок около 500 КБ/с. Поэтому на кадр
 // отводится бюджет времени, внутри которого мы ждём данные через poll().
-PtyReadResult pty_read(int pty_fd, GhosttyTerminal terminal, double budget_s)
+PtyReadResult pty_read(int pty_fd, GhosttyTerminal terminal, double budget_s,
+                       unsigned long *bytes_out)
 {
+    if (bytes_out) *bytes_out = 0;
     // Буфер побольше: 4 КБ означало лишний системный вызов на каждые 4 КБ вывода.
     static uint8_t buf[65536];
 
@@ -167,6 +169,7 @@ PtyReadResult pty_read(int pty_fd, GhosttyTerminal terminal, double budget_s)
         ssize_t n = read(pty_fd, buf, sizeof(buf));
         if (n > 0) {
             ghostty_terminal_vt_write(terminal, buf, (size_t)n);
+            if (bytes_out) *bytes_out += (unsigned long)n;
             got_data = true;
             if (now_seconds() - started >= budget_s)
                 return PTY_READ_OK;

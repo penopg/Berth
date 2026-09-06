@@ -38,6 +38,14 @@ void settings_defaults(Settings *s)
     snprintf(s->task_model, sizeof(s->task_model), "sonnet");
     snprintf(s->theme_panel, sizeof(s->theme_panel), "berth");
     snprintf(s->theme_window, sizeof(s->theme_window), "project");
+    snprintf(s->marker, sizeof(s->marker), "karateka");
+}
+
+bool settings_scene_enabled(const Settings *s)
+{
+    const char *env = getenv("BERTH_MARKER");
+    if (env && *env) return !strcmp(env, "karateka");
+    return !strcmp(s->marker, "karateka");
 }
 
 static char *trim(char *s)
@@ -114,6 +122,8 @@ bool settings_load(Settings *s, const char *path)
             s->resume_within = parse_int(val, 0, 100000, s->resume_within);
         else if (!strcmp(key, "skills_off"))
             snprintf(s->skills_off, sizeof(s->skills_off), "%s", val);
+        else if (!strcmp(key, "marker") && *val)
+            snprintf(s->marker, sizeof(s->marker), "%s", val);
         else if (!strcmp(key, "default_agent") && *val)
             snprintf(s->default_agent, sizeof(s->default_agent), "%s", val);
     }
@@ -195,7 +205,11 @@ bool settings_save(const Settings *s, const char *path)
         "# При запуске поднимать процессом только разговоры с работой за последние\n"
         "# N часов; остальные вкладки открываются страницей, разговор продолжается\n"
         "# по кнопке тем же id. 0 — поднимать все.\n"
-        "resume_within = %d\n",
+        "resume_within = %d\n"
+        "\n"
+        "# Маркер активного разговора в панели: dot — точка, karateka — сценка с\n"
+        "# каратекой (бой, пока агент работает; победа; поклон, когда зовёт).\n"
+        "marker = %s\n",
         FONT_SIZE_LO, FONT_SIZE_HI, s->font_size,
         SIDEBAR_LO, SIDEBAR_HI, s->sidebar_width,
         s->sidebar_visible ? "yes" : "no",
@@ -206,7 +220,8 @@ bool settings_save(const Settings *s, const char *path)
         s->task_model,
         s->collapsed_show_live ? "yes" : "no",
         s->usage_fetch ? "yes" : "no",
-        s->skills_off, s->ctx_warn, s->ctx_crit, s->sleep_after, s->resume_within);
+        s->skills_off, s->ctx_warn, s->ctx_crit, s->sleep_after, s->resume_within,
+        s->marker);
 
     fclose(f);
     remember_mtime(path);

@@ -681,3 +681,12 @@ void journal_mention(const JournalEvent *ev, const char *cwd, char *out, size_t 
                  "там шла речь и к чему пришли, напомни мне коротко — и продолжим оттуда.",
                  utc_from);
 }
+
+time_t journal_file_mtime(const char *cwd)
+{
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s", cwd, JOURNAL_FILE);
+    struct stat sb;
+    if (stat(path, &sb) != 0) return 0;
+    return sb.st_mtime;
+}

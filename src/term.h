@@ -26,6 +26,8 @@ typedef struct {
     bool   child_exited;    // pty отдал EOF/ошибку
     bool   child_reaped;    // waitpid прошёл
     int    child_status;    // -1 пока неизвестен
+    unsigned long bytes_in; // сколько байт процесс вывел за всё время: поток
+                            // вывода — живой признак работы агента
 
     // Состояние терминала и кодировщики ввода
     GhosttyTerminal      vt;

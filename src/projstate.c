@@ -38,6 +38,7 @@ static void load(ProjectState *st, const char *cwd)
     snprintf(st->cwd, sizeof(st->cwd), "%s", cwd);
     projinfo_load(&st->info, cwd);
     journal_load(&st->journal, cwd);
+    st->journal_mtime = journal_file_mtime(cwd);
     tasks_load(&st->tasks, cwd);
 }
 
@@ -94,5 +95,13 @@ void projstate_poll(void)
         if (tasks_changed(&st->tasks, st->cwd))
             tasks_load(&st->tasks, st->cwd);
         projinfo_refresh_summary(&st->info);
+        // Дневник дописал агент (задача сбора кончилась) или человек:
+        // лента перечитывается сама, кнопка «Обновить» для этого не нужна.
+        // История jsonl при этом дочитывается инкрементально — дёшево.
+        time_t jm = journal_file_mtime(st->cwd);
+        if (jm != st->journal_mtime) {
+            journal_load(&st->journal, st->cwd);
+            st->journal_mtime = jm;
+        }
     }
 }

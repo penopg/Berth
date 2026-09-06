@@ -5,6 +5,7 @@
 
 #include "ui.h"
 #include "projstate.h"
+#include "xp.h"
 
 // Текст с обрезкой по ширине. Шрифт моноширинный, поэтому ширина считается
 // по ячейкам, без измерения строки на каждый символ. Резать надо по границам
@@ -297,13 +298,31 @@ static int draw_ctx_column(const Session *session, Rect r, int line_y,
     return width + f->cell_width;
 }
 
+// Длина строки в знаках, не в байтах: «Σ» — два байта, одно знакоместо.
+static size_t utf8_len(const char *s)
+{
+    size_t n = 0;
+    for (; *s; s++) if (((unsigned char)*s & 0xC0) != 0x80) n++;
+    return n;
+}
+
+// Токены коротко: 850, 12.3k, 240k, 1.3M.
+static void fmt_tokens(long n, char *out, size_t cap)
+{
+    if (n < 1000)         snprintf(out, cap, "%ld", n);
+    else if (n < 100000)  snprintf(out, cap, "%.1fk", n / 1000.0);
+    else if (n < 1000000) snprintf(out, cap, "%ldk", n / 1000);
+    else                  snprintf(out, cap, "%.1fM", n / 1000000.0);
+}
+
 // Строка панели. Проект может быть открыт (есть сессия) или закрыт — тогда
 // показываем только имя, а клик его откроет.
 static void draw_item_row(const PanelRow *row, const Project *project,
                           const Session *session,
                           const FontAtlas *f, const Theme *th,
                           bool active, bool hovered, double time,
-                          int ctx_warn, int ctx_crit)
+                          int ctx_warn, int ctx_crit,
+                          const Sprites *sprites, Rect clip)
 {
     Rect r = row->rect;
 
@@ -320,10 +339,37 @@ static void draw_item_row(const PanelRow *row, const Project *project,
     draw_guides(row, marker, th);
     draw_guide_stub(row, marker, th);
     bool live = session && session_has_term(session);
-    ui_draw_marker(marker, live, session ? session->state : SESSION_STATE_IDLE,
-                   time, th);
-
     int text_x = r.x + ROW_TEXT_X + row->depth * ROW_INDENT;
+
+    // Сценка с каратекой вместо маркера — у каждого живого разговора в
+    // строке на три линии (спящий сжат до одной, ему точка). Ячейка
+    // обрезается ножницами: противник вбегает из-за её края, а не из-под
+    // имени проекта. Пол сцены — на третьей текстовой линии: ноги бойцов и
+    // счёт боя стоят на одной базовой линии. Текстовый блок сдвигается за
+    // ячейку целиком, с тем же зазором, что у маркера до имени.
+    const Scene *scene = NULL;
+    int line_y3 = r.y + 4 + f->cell_height * 2;
+    if (sprites && live && session->scene_ready && r.h >= f->cell_height * 3 + 6) {
+        scene = &session->scene;
+        Rect cell = { marker.x, r.y + 2, SCENE_WIDTH, r.h - 4 };
+        int cx0 = cell.x > clip.x ? cell.x : clip.x;
+        int cy0 = cell.y > clip.y ? cell.y : clip.y;
+        int cx1 = cell.x + cell.w < clip.x + clip.w ? cell.x + cell.w : clip.x + clip.w;
+        int cy1 = cell.y + cell.h < clip.y + clip.h ? cell.y + cell.h : clip.y + clip.h;
+        if (cx1 > cx0 && cy1 > cy0) {
+            EndScissorMode();
+            BeginScissorMode(cx0, cy0, cx1 - cx0, cy1 - cy0);
+            float floor_y = (float)(line_y3 + f->cell_height - 2);
+            scene_draw(scene, sprites, (float)(cell.x + 14), floor_y, 1.0f, th->badge_dead);
+            EndScissorMode();
+            BeginScissorMode(clip.x, clip.y, clip.w, clip.h);
+        }
+        text_x = cell.x + cell.w + 6;
+    } else {
+        ui_draw_marker(marker, live, session ? session->state : SESSION_STATE_IDLE,
+                       time, th);
+    }
+
     int avail = r.x + r.w - 14 - text_x;
 
     // Родитель с подпроектами получает шеврон у самого левого края, перед
@@ -367,8 +413,72 @@ static void draw_item_row(const PanelRow *row, const Project *project,
     if (session && r.h >= f->cell_height * 2 + 6) {
         Color sub = session->state == SESSION_STATE_ATTENTION
                   ? th->badge_attention : th->row_text_dim;
-        ui_text_clipped(f, session_subtitle(session), text_x,
-                        r.y + 4 + f->cell_height, sub, avail);
+        int line_y2 = r.y + 4 + f->cell_height;
+        int avail2 = avail;
+
+        // Сумма проекта — справа на второй линии, приглушённо, тем же правым
+        // краем, что столбец контекста: сколько токенов агент написал в
+        // этом проекте за всё время. Под курсором уступает кнопке страницы.
+        // После победы итог боя «+X» перелетает сюда, и сумма докручивается.
+        long total = live ? xp_tokens(session->cwd) : 0;
+        if (total > 0 && !hovered) {
+            long show = total;
+            float fly_t = -1;
+            if (scene && scene->mood == SCENE_WIN && scene->result > 0) {
+                if (scene->clock < 0.9f) { show = total - scene->result; fly_t = scene->clock / 0.9f; }
+                else if (scene->clock < 1.7f) {
+                    float k = (scene->clock - 0.9f) / 0.8f;
+                    show = total - scene->result + (long)((float)scene->result * k);
+                }
+                if (show < 0) show = 0;
+            }
+            char sum[24], label[32];
+            fmt_tokens(show, sum, sizeof(sum));
+            snprintf(label, sizeof(label), "Σ %s", sum);
+            int lw = (int)(utf8_len(label)) * f->cell_width;
+            int lx = r.x + r.w - 14 - lw;
+            ui_text_clipped(f, label, lx, line_y2, th->row_text_dim, lw + 2);
+            avail2 -= lw + f->cell_width;
+
+            // Перелёт «+X»: от счёта боя на третьей линии к сумме, по дуге,
+            // тая к концу пути.
+            if (fly_t >= 0) {
+                char n[16], plus[20];
+                fmt_tokens(scene->result, n, sizeof(n));
+                snprintf(plus, sizeof(plus), "+%s", n);
+                float x0 = (float)text_x + 12.0f, y0 = (float)line_y3;
+                float x1 = (float)lx, y1 = (float)line_y2;
+                float ease = fly_t * fly_t * (3.0f - 2.0f * fly_t);
+                float px = x0 + (x1 - x0) * ease;
+                float py = y0 + (y1 - y0) * ease - 10.0f * sinf(fly_t * 3.14159f);
+                Color c = th->progress_fill;
+                if (fly_t > 0.7f) c.a = (unsigned char)(255 * (1.0f - (fly_t - 0.7f) / 0.3f));
+                ui_text_clipped(f, plus, (int)px, (int)py, c, f->cell_width * 8);
+            }
+        }
+        ui_text_clipped(f, session_subtitle(session), text_x, line_y2, sub, avail2);
+    }
+
+    // Третья линия — счёт боя: точка, что дышит в такт и вспыхивает на
+    // попадании, число токенов с начала боя и приглушённая единица «tok».
+    if (scene && scene->mood == SCENE_FIGHT && scene->enemy_phase == ENEMY_FIGHT) {
+        char score[24];
+        fmt_tokens(scene_fight_score(scene), score, sizeof(score));
+        float grow = scene->bump > 0 ? 1.0f + 0.4f * (scene->bump / 0.28f) : 1.0f;
+        float size = (float)f->size * grow;
+        float breath = 0.5f + 0.5f * sinf((float)time * 4.0f);
+        float rad = 2.0f + 0.8f * breath + (scene->bump > 0 ? 1.5f * (scene->bump / 0.28f) : 0);
+        Color dot = th->row_text;
+        dot.a = (unsigned char)(255 * (0.55f + 0.45f * breath));
+        DrawCircle(text_x + 4, line_y3 + f->cell_height / 2, rad, dot);
+        Font face = font_for(f, score);
+        float tx = (float)text_x + 12.0f;
+        // Растёт от базовой линии: цифра подскакивает, а не сползает.
+        float ty = (float)line_y3 + (float)f->cell_height - size * ((float)f->cell_height / (float)f->size);
+        DrawTextEx(face, score, (Vector2){ tx, ty }, size, 0, th->row_text);
+        int sw = (int)strlen(score) * f->cell_width;
+        ui_text_clipped(f, "tok", text_x + 12 + sw + f->cell_width / 2, line_y3,
+                        th->row_text_dim, f->cell_width * 3);
     }
 
     // Кнопка страницы проекта — только под курсором: держать её на каждой
@@ -573,7 +683,8 @@ void ui_draw_topbar(const Layout *l, const SessionList *sessions,
 void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
                      const SessionList *sessions,
                      const FontAtlas *font, const Theme *theme,
-                     Vector2 mouse, bool splitter_active)
+                     Vector2 mouse, bool splitter_active,
+                     const Sprites *sprites)
 {
     if (!l->sidebar_visible) return;
 
@@ -616,7 +727,7 @@ void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
             draw_task_row(row, session, font, theme, active, hovered == row, now);
         else
             draw_item_row(row, project, session, font, theme, active, hovered == row, now,
-                          l->ctx_warn, l->ctx_crit);
+                          l->ctx_warn, l->ctx_crit, sprites, l->sidebar);
     }
 
     EndScissorMode();

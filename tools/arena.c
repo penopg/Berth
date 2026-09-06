@@ -99,13 +99,17 @@ int main(int argc, char **argv)
                                 ANIM_NAMES[b_anim], b_frame, n),
                      16, 16, 10, LIGHTGRAY);
         } else {
-            scene_draw(&sc, &sp, 200, floor, scale);
+            scene_draw(&sc, &sp, 200, floor, scale, (Color){ 235, 80, 70, 255 });
+            // Клавиша T — как будто пришли токены: удар и подскок счёта.
+            if (IsKeyPressed(KEY_T)) scene_score(&sc, sc.score + 700);
+            // Зажатая B — как будто агент льёт текст: удары подряд.
+            scene_activity(&sc, IsKeyDown(KEY_B) ? 500 : 0, dt);
         }
         double draw_ms = (GetTime() - t0) * 1000.0;
         draw_total += draw_ms;
         frames++;
 
-        DrawText(TextFormat("1 idle  2 fight  3 win  4 call  5 fail   space pause   f frames   +/- scale (%d)",
+        DrawText(TextFormat("1 idle  2 fight  3 win  4 call  5 fail  t tokens  b (hold) stream  space pause  f frames  +/- scale (%d)",
                             (int)scale), 16, 290, 10, GRAY);
         DrawText(TextFormat("mood: %d   enemy phase: %d   scene draw %.3f ms   frame %.2f ms",
                             sc.mood, sc.enemy_phase, draw_ms, dt * 1000.0f),

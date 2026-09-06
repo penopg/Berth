@@ -100,6 +100,12 @@ static int session_row_height(const Layout *l, const SessionList *sessions,
     if (session != sessions->active && l->sleep_after > 0
         && session_sleeping(&sessions->items[session], now, l->sleep_after))
         return l->metrics.row_height_idle;
+    // Сценка выше двух строк текста: фигурка в оригинальном размере NES.
+    // У каждого живого разговора своя — бой виден и у неактивной вкладки;
+    // пустая сцена (герой ушёл) — обычная строка.
+    const Session *s = &sessions->items[session];
+    if (l->scene && s->scene_ready && scene_active(&s->scene))
+        return l->metrics.row_height_scene;
     return l->metrics.row_height;
 }
 

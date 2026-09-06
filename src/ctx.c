@@ -157,3 +157,38 @@ static bool scan(char *buf, long from, CtxInfo *out)
     if (found) *out = best;
     return found;
 }
+
+long ctx_spent_since(const char *jsonl_path, long *offset, char last_id[64])
+{
+    FILE *f = fopen(jsonl_path, "r");
+    if (!f) return 0;
+    if (*offset < 0) {
+        fseek(f, 0, SEEK_END);
+        *offset = ftell(f);
+        fclose(f);
+        return 0;
+    }
+    fseek(f, *offset, SEEK_SET);
+
+    long spent = 0;
+    char *line = NULL;
+    size_t cap = 0;
+    ssize_t n;
+    while ((n = getline(&line, &cap, f)) > 0) {
+        // Незаконченная строка (без перевода) дописывается прямо сейчас —
+        // её дочитаем в следующий раз, с того же места.
+        if (line[n - 1] != '\n') break;
+        *offset += n;
+        if (!strstr(line, "\"type\":\"assistant\"") || !strstr(line, "\"usage\":{")) continue;
+
+        char id[64];
+        field_str(line, "\"message\":{\"id\"", id, sizeof(id));
+        if (!id[0]) field_str(line, "\"id\":\"msg_", id, sizeof(id));
+        if (id[0] && !strcmp(id, last_id)) continue;
+        snprintf(last_id, 64, "%s", id);
+        spent += field_long(line, "\"output_tokens\"");
+    }
+    free(line);
+    fclose(f);
+    return spent;
+}

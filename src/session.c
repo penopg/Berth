@@ -8,6 +8,7 @@
 #include <stdint.h>
 
 #include "session.h"
+#include "xp.h"
 #include "claude.h"
 #include "projstate.h"
 
@@ -136,6 +137,8 @@ static void id_from_command(Session *s, const char *cmd)
     if (strstr(cmd, "--fork-session")) s->session_id[0] = '\0';
 }
 
+static void term_apply_theme(Term *t, const Theme *theme);
+
 static bool start_term(Session *s, const AgentProfile *agent,
                        uint16_t cols, uint16_t rows,
                        int cell_width, int cell_height,
@@ -152,8 +155,9 @@ static bool start_term(Session *s, const AgentProfile *agent,
 
     // Цвета терминала задаёт тема вкладки. Приложение внутри вольно
     // переопределить их своими escape-последовательностями — это лишь
-    // значения по умолчанию.
-    session_set_theme(s, s->theme);
+    // значения по умолчанию. Прямо в терминал: kind здесь может быть ещё
+    // «страница», и session_set_theme ничего бы не сделала.
+    term_apply_theme(&s->term, s->theme ? s->theme : theme_default());
 
     // Паспорт проекта печатается первым, до запуска агента: человек видит,
     // куда попал, ещё до того как агент начнёт занимать экран.
@@ -306,16 +310,26 @@ static GhosttyColorRgb rgb_of(Color c)
 // Тема вкладки красит только её терминал: панель и страницы берут тему
 // окна. Живому терминалу цвета ставятся сразу — смена темы в настройках
 // видна без перезапуска.
+// Цвета темы — в терминал. Отдельно от session_set_theme: при превращении
+// страницы в терминал kind ещё «страница», и проверка session_has_term
+// молча пропускала бы установку — так и вышло: первый запуск агента шёл
+// в цветах по умолчанию, пока тему не передёргивали в настройках.
+static void term_apply_theme(Term *t, const Theme *theme)
+{
+    term_set_default_colors(t, rgb_of(theme->term_bg), rgb_of(theme->term_fg));
+    GhosttyColorRgb ansi[16];
+    for (int i = 0; i < 16; i++) ansi[i] = rgb_of(theme->palette[i]);
+    term_set_palette(t, rgb_of(theme->cursor), ansi);
+}
+
 void session_set_theme(Session *s, const Theme *theme)
 {
     if (!theme) theme = theme_default();
     s->theme = theme;
     if (!session_has_term(s)) return;
-    term_set_default_colors(&s->term, rgb_of(theme->term_bg), rgb_of(theme->term_fg));
-    GhosttyColorRgb ansi[16];
-    for (int i = 0; i < 16; i++) ansi[i] = rgb_of(theme->palette[i]);
-    term_set_palette(&s->term, rgb_of(theme->cursor), ansi);
+    term_apply_theme(&s->term, theme);
 }
+
 
 void session_refresh_info(Session *s)
 {
@@ -403,6 +417,11 @@ void session_track_ctx(Session *s)
 
     CtxInfo info;
     if (ctx_read(path, &info)) s->ctx = info;
+
+    if (!s->spent_started) { s->spent_offset = -1; s->spent_started = true; }
+    long spent = ctx_spent_since(path, &s->spent_offset, s->spent_last_id);
+    s->tokens_out += spent;
+    xp_add(s->cwd, spent);
 }
 
 // Заголовок без служебных значков впереди. Claude Code ставит перед именем

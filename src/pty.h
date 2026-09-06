@@ -35,6 +35,8 @@ typedef enum {
 // budget_s — сколько времени кадр готов потратить на эту вкладку. Ждём данные
 // только когда поток уже пошёл: у молчащей вкладки чтение стоит один системный
 // вызов, иначе каждая простаивающая вкладка проедала бы кадр целиком.
-PtyReadResult pty_read(int pty_fd, GhosttyTerminal terminal, double budget_s);
+// bytes_out — сколько байт прочитано за вызов (может быть NULL).
+PtyReadResult pty_read(int pty_fd, GhosttyTerminal terminal, double budget_s,
+                       unsigned long *bytes_out);
 
 #endif // BERTH_PTY_H

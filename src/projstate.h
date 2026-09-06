@@ -25,6 +25,7 @@ typedef struct {
     TaskList tasks;
     SkillList skills;
     time_t   touched;   // когда набор последний раз спрашивали
+    time_t   journal_mtime;   // .berth/journal.md на момент чтения ленты
 } ProjectState;
 
 // Тот же набор, но на запись — для перестановки задач и отметок о

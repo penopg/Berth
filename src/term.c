@@ -338,8 +338,10 @@ void term_resize(Term *t, uint16_t cols, uint16_t rows,
 void term_poll(Term *t, double budget_s)
 {
     if (!t->child_exited) {
-        if (pty_read(t->pty_fd, t->vt, budget_s) != PTY_READ_OK)
+        unsigned long got = 0;
+        if (pty_read(t->pty_fd, t->vt, budget_s, &got) != PTY_READ_OK)
             t->child_exited = true;
+        t->bytes_in += got;
     }
 
     // EOF на pty может прийти раньше, чем ребёнок станет ожидаемым, поэтому
