@@ -1,0 +1,13 @@
+build/
+vendor/
+ref/
+.direnv/
+.cache/
+.DS_Store
+compile_commands.json
+ghostling/
+
+# Личное: рабочий журнал и задачи этого проекта, заметки автора.
+# В репозиторий идёт только сам берт.
+.berth/
+HANDOFF.md
