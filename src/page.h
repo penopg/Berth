@@ -59,6 +59,11 @@ typedef enum {
     PAGE_EVENT_SKILL_OPEN,       // открыть папку скилла в Finder
     PAGE_EVENT_SKILL_EDIT,       // открыть SKILL.md в редакторе
     PAGE_EVENT_NEW_SKILL,        // завести скилл; title — имя, body — когда применять
+    // Документы из реестра .berth/files.tsv. arg — номер строки реестра.
+    PAGE_EVENT_FILE_OPEN,        // открыть файл штатно
+    PAGE_EVENT_FILE_REVEAL,      // показать файл в Finder
+    PAGE_EVENT_DESCRIBE_FILES,   // описать неописанные документы скиллом berth-files
+
     PAGE_EVENT_NEW_PROJECT,      // завести проект в группе: cwd — папка группы, text — группа,
                                  // title — имя папки, body — о чём одной строкой
 

@@ -1408,6 +1408,87 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
     body_text(c, foot, 0, c->theme->row_text_dim);
 }
 
+// Документы проекта — реестр .berth/files.tsv: имя, пояснение, давность.
+// Раздел отвечает на «что это за файл» без открытия файла; открыть —
+// клик, показать в Finder — «Папка» под курсором. Пропавший файл виден
+// приглушённым: реестр устарел, и это должно быть видно, а не спрятано.
+static void draw_files(Ctx *c, const Session *s, const FileList *fl)
+{
+    if (!fl || !fl->exists) return;
+
+    char title[64];
+    snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы", fl->count);
+    section(c, title);
+
+    const int cw = c->font->cell_width;
+    for (int i = 0; i < fl->count; i++) {
+        const FileEntry *e = &fl->items[i];
+        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * 2 + 6 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+
+        Color tone = e->exists ? c->theme->row_text : c->theme->row_text_dim;
+        const char *base = strrchr(e->path, '/');
+        base = base ? base + 1 : e->path;
+
+        // Справа: давность, а под курсором перед ней — «Папка».
+        char age[32];
+        if (e->exists) projinfo_age(e->mtime, age, sizeof(age));
+        else           snprintf(age, sizeof(age), "нет файла");
+        int age_w = chars_of(age) * cw;
+        int right = c->x + content_width(c);
+        ui_text_clipped(c->font, age, right - age_w, c->y,
+                        e->exists ? c->theme->row_text_dim : c->theme->badge_attention, age_w);
+        bool reveal_hit = false;
+        if (hover && e->exists) {
+            const char *act = "Папка";
+            int aw = chars_of(act) * cw;
+            Rect ar = { right - age_w - aw - cw * 2 - 8, c->y - 3, aw + 16, c->line + 2 };
+            bool ah = inside(ar, c->mouse);
+            if (ah) DrawRectangle(ar.x, ar.y, ar.w, ar.h, c->theme->sidebar_border);
+            ui_text_clipped(c->font, act, ar.x + 8, c->y,
+                            ah ? c->theme->row_text : c->theme->row_text_dim, aw);
+            reveal_hit = ah;
+            right = ar.x;
+        } else {
+            right -= age_w;
+        }
+        ui_text_clipped(c->font, base, c->x, c->y, tone, right - c->x - cw);
+        c->y += c->line;
+        ui_text_clipped(c->font, e->note, c->x + cw * 2, c->y, c->theme->row_text_dim,
+                        content_width(c) - cw * 2);
+        c->y += c->line;
+
+        if (hover && c->click) {
+            if (reveal_hit)      set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
+            else if (e->exists)  set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
+        }
+        gap(c, 0);
+        c->y += 4;
+    }
+    if (fl->count == 0)
+        text(c, "Реестр пуст", c->theme->row_text_dim);
+    if (fl->partial)
+        text(c, "В реестре строк больше, чем показано", c->theme->row_text_dim);
+
+    // Неописанные документы: число по обходу папки и действие. Обход
+    // ограничен, поэтому число может быть «не меньше».
+    if (fl->undescribed > 0) {
+        gap(c, 1);
+        char note[96];
+        snprintf(note, sizeof(note), "ещё %s%d %s без пояснения",
+                 fl->scan_cut ? "не меньше " : "", fl->undescribed,
+                 plural3(fl->undescribed, "файл", "файла", "файлов"));
+        row_begin(c);
+        ui_text_clipped(c->font, note, c->row_x, c->y + 6, c->theme->row_text_dim,
+                        content_width(c) / 2);
+        c->row_x += chars_of(note) * cw + cw * 2;
+        if (button(c, "Описать", false))
+            set_event(c, PAGE_EVENT_DESCRIBE_FILES, 0, NULL);
+        row_end(c);
+    }
+}
+
 // Сводка — первое, что видно: что это за проект, где он сейчас и что
 // дальше. Её пишет агент по паспорту, коду и истории, поэтому она есть и
 // там, где CLAUDE.md не заводили. Пока сводки нет, показываем статус из
@@ -1786,6 +1867,10 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 
     // Подпроекты — после своих задач, свёрнутыми разделами.
     draw_subprojects(&c, s, projects);
+
+    // Документы — что агент и человек сделали для чтения: после задач,
+    // перед оснасткой.
+    draw_files(&c, s, &st->files);
 
     // Скиллы — последними: это оснастка проекта, к ней ходят реже, чем к
     // задачам.

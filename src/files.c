@@ -1,0 +1,183 @@
+#include <dirent.h>
+#include <stdio.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/stat.h>
+
+#include "files.h"
+
+static const double SCAN_EVERY = 30.0;   // секунд между обходами папки
+static const int    SCAN_LIMIT = 6000;   // записей каталога за обход
+static const int    SCAN_DEPTH = 6;
+
+static void files_path(const char *cwd, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s/%s", cwd, FILES_FILE);
+}
+
+static time_t file_mtime(const char *path)
+{
+    struct stat st;
+    return stat(path, &st) == 0 ? st.st_mtime : 0;
+}
+
+static void rtrim(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\n'
+                     || s[n - 1] == '\r'))
+        s[--n] = '\0';
+}
+
+void files_load(FileList *fl, const char *cwd)
+{
+    memset(fl, 0, sizeof(*fl));
+    fl->undescribed = -1;
+    if (!cwd || !*cwd) return;
+
+    char path[700];
+    files_path(cwd, path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    fl->exists = true;
+    fl->mtime = file_mtime(path);
+
+    char line[FILE_PATH_MAX + FILE_NOTE_MAX + 64];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        if (fl->count >= FILES_MAX) { fl->partial = true; break; }
+        *tab = '\0';
+        FileEntry *e = &fl->items[fl->count++];
+        memset(e, 0, sizeof(*e));
+        const char *p = line;
+        if (!strncmp(p, "./", 2)) p += 2;
+        snprintf(e->path, sizeof(e->path), "%s", p);
+        rtrim(e->path);
+        snprintf(e->note, sizeof(e->note), "%s", tab + 1);
+        rtrim(e->note);
+    }
+    fclose(f);
+    files_refresh(fl, cwd);
+}
+
+bool files_changed(const FileList *fl, const char *cwd)
+{
+    if (!cwd || !*cwd) return false;
+    char path[700];
+    files_path(cwd, path, sizeof(path));
+    return file_mtime(path) != fl->mtime;
+}
+
+// --- что считается документом ----------------------------------------------------
+
+static const char *const DOC_EXT[] = {
+    ".md", ".txt", ".tsv", ".csv", ".pdf", ".png", ".jpg", ".jpeg", ".gif",
+    ".docx", ".xlsx", ".pptx", ".key", ".numbers", ".pages", ".rtf",
+};
+
+static const char *const SKIP_DIRS[] = {
+    "node_modules", "build", "dist", "vendor", "target", "__pycache__",
+};
+
+static const char *base_of(const char *rel)
+{
+    const char *b = strrchr(rel, '/');
+    return b ? b + 1 : rel;
+}
+
+bool files_is_document(const char *rel)
+{
+    const char *base = base_of(rel);
+    const char *dot = strrchr(base, '.');
+    if (!dot) return false;
+    bool doc = false;
+    for (size_t i = 0; i < sizeof(DOC_EXT) / sizeof(*DOC_EXT); i++)
+        if (!strcasecmp(dot, DOC_EXT[i])) { doc = true; break; }
+    if (!doc) return false;
+    // Паспорт, README и лицензию и так знают; служебные файлы берта — на
+    // своих страницах. Внутри .berth документами считаются только таблицы.
+    if (!strcasecmp(base, "CLAUDE.md") || !strncasecmp(base, "README", 6)
+        || !strncasecmp(base, "LICENSE", 7) || !strncasecmp(base, "COPYING", 7)
+        || !strcasecmp(base, "OFL.txt") || !strcasecmp(base, "CMakeLists.txt")
+        || !strncasecmp(base, "requirements", 12))
+        return false;
+    if (!strncmp(rel, ".berth/", 7))
+        return !strncmp(rel, ".berth/data/", 12) && !strcasecmp(dot, ".tsv");
+    return true;
+}
+
+static bool listed(const FileList *fl, const char *rel)
+{
+    for (int i = 0; i < fl->count; i++)
+        if (!strcmp(fl->items[i].path, rel)) return true;
+    return false;
+}
+
+typedef struct {
+    const FileList *fl;
+    int   budget;
+    int   found;
+    bool  cut;
+} Scan;
+
+static void scan_dir(Scan *sc, const char *root, const char *rel, int depth)
+{
+    if (depth > SCAN_DEPTH) return;
+    char abs[1024];
+    snprintf(abs, sizeof(abs), "%s%s%s", root, *rel ? "/" : "", rel);
+    DIR *d = opendir(abs);
+    if (!d) return;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        if (--sc->budget <= 0) { sc->cut = true; break; }
+        const char *n = de->d_name;
+        if (n[0] == '.') {
+            // Скрытое пропускаем, кроме .berth в корне — ради .berth/data.
+            if (depth != 0 || strcmp(n, ".berth")) continue;
+        }
+        char sub[FILE_PATH_MAX];
+        if (snprintf(sub, sizeof(sub), "%s%s%s", rel, *rel ? "/" : "", n) >= (int)sizeof(sub))
+            continue;
+        if (de->d_type == DT_DIR) {
+            bool skip = false;
+            for (size_t i = 0; i < sizeof(SKIP_DIRS) / sizeof(*SKIP_DIRS); i++)
+                if (!strcmp(n, SKIP_DIRS[i])) { skip = true; break; }
+            // Внутри .berth интересна только data.
+            if (!strcmp(rel, ".berth") && strcmp(n, "data")) skip = true;
+            // Вложенный репозиторий — чужой код (референс, сабмодуль):
+            // его документы не наши.
+            if (!skip && depth >= 0) {
+                char git[1100];
+                snprintf(git, sizeof(git), "%s/%s/.git", abs, n);
+                struct stat gs;
+                if (stat(git, &gs) == 0) skip = true;
+            }
+            if (!skip) scan_dir(sc, root, sub, depth + 1);
+        } else if (de->d_type == DT_REG) {
+            if (files_is_document(sub) && !listed(sc->fl, sub)) sc->found++;
+        }
+    }
+    closedir(d);
+}
+
+void files_refresh(FileList *fl, const char *cwd)
+{
+    if (!cwd || !*cwd || !fl->exists) return;
+    for (int i = 0; i < fl->count; i++) {
+        FileEntry *e = &fl->items[i];
+        char abs[1024];
+        snprintf(abs, sizeof(abs), "%s/%s", cwd, e->path);
+        struct stat st;
+        e->exists = stat(abs, &st) == 0 && S_ISREG(st.st_mode);
+        e->mtime = e->exists ? st.st_mtime : 0;
+    }
+    time_t now = time(NULL);
+    if (fl->undescribed >= 0 && (double)(now - fl->scanned_at) < SCAN_EVERY) return;
+    Scan sc = { fl, SCAN_LIMIT, 0, false };
+    scan_dir(&sc, cwd, "", 0);
+    fl->undescribed = sc.found;
+    fl->scan_cut = sc.cut;
+    fl->scanned_at = now;
+}

@@ -40,6 +40,7 @@ static void load(ProjectState *st, const char *cwd)
     journal_load(&st->journal, cwd);
     st->journal_mtime = journal_file_mtime(cwd);
     tasks_load(&st->tasks, cwd);
+    files_load(&st->files, cwd);
 }
 
 ProjectState *projstate_edit(const char *cwd)
@@ -94,6 +95,12 @@ void projstate_poll(void)
         if (!st->cwd[0]) continue;
         if (tasks_changed(&st->tasks, st->cwd))
             tasks_load(&st->tasks, st->cwd);
+        // Реестр документов дописывает агент (задача «Описать» или по ходу
+        // работы): перечитывается по mtime, а файлы в нём — по stat.
+        if (files_changed(&st->files, st->cwd))
+            files_load(&st->files, st->cwd);
+        else
+            files_refresh(&st->files, st->cwd);
         projinfo_refresh_summary(&st->info);
         // Дневник дописал агент (задача сбора кончилась) или человек:
         // лента перечитывается сама, кнопка «Обновить» для этого не нужна.

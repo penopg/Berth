@@ -523,17 +523,24 @@ static void save_layout(App *app);
 
 // Отдать путь системе: папку — в Finder, файл — в редактор по умолчанию
 // (`open -t`). Двойной fork, чтобы не оставлять зомби: внука никто не ждёт.
-static void open_external(const char *target, bool edit) {
+// Открыть снаружи: штатно, в текстовом редакторе (-t) или показать в
+// Finder (-R — работает и для файлов в скрытой .berth). Двойной fork,
+// чтобы не оставлять зомби: внука никто не ждёт.
+static void open_with(const char *target, const char *flag) {
     pid_t pid = fork();
     if (pid == 0) {
         if (fork() == 0) {
-            if (edit) execl("/usr/bin/open", "open", "-t", target, (char *)NULL);
+            if (flag) execl("/usr/bin/open", "open", flag, target, (char *)NULL);
             else      execl("/usr/bin/open", "open", target, (char *)NULL);
             _exit(127);
         }
         _exit(0);
     }
     if (pid > 0) waitpid(pid, NULL, 0);
+}
+
+static void open_external(const char *target, bool edit) {
+    open_with(target, edit ? "-t" : NULL);
 }
 
 // Папка, в которой живут проекты группы. У группы-папки это она сама; у
@@ -983,6 +990,53 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
     case PAGE_EVENT_SKILL_TOGGLE:
         s->page_skill_open = (s->page_skill_open == ev.arg + 1) ? 0 : ev.arg + 1;
         break;
+
+    case PAGE_EVENT_FILE_OPEN:
+    case PAGE_EVENT_FILE_REVEAL: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->files.count) break;
+        const FileEntry *e = &st->files.items[ev.arg];
+        char target[PROJECT_PATH_MAX + FILE_PATH_MAX + 2];
+        snprintf(target, sizeof(target), "%s/%s", s->cwd, e->path);
+        // Текст — в редактор (`open -t`), остальное — штатно: tsv уходит в
+        // Numbers, pdf и картинки — в просмотр. Finder — `open -R`.
+        const char *dot = strrchr(e->path, '.');
+        bool textual = dot && (!strcasecmp(dot, ".md") || !strcasecmp(dot, ".txt"));
+        if (ev.kind == PAGE_EVENT_FILE_REVEAL) open_with(target, "-R");
+        else                                   open_with(target, textual ? "-t" : NULL);
+        snprintf(s->page_notice, sizeof(s->page_notice), "%s", e->path);
+        break;
+    }
+
+    case PAGE_EVENT_DESCRIBE_FILES: {
+        // Задачей-вкладкой, как журнал и сводка: скилл berth-files обходит
+        // папку и дописывает строки на всё, чего в реестре нет. Права
+        // точечно: посмотреть папку и файлы, дописать реестр.
+        int was = app->sessions.active;
+        char cmd[900];
+        snprintf(cmd, sizeof(cmd),
+                 "claude -p \"По скиллу berth-files опиши документы проекта: обойди папку, "
+                 "для каждого документа, которого нет в .berth/files.tsv, добавь строку с "
+                 "пояснением. Существующие строки не переписывай.\" "
+                 "--verbose --no-session-persistence%s "
+                 "--permission-mode acceptEdits "
+                 "--allowed-tools \"Bash(find *)\" \"Bash(ls *)\" \"Bash(head *)\" "
+                 "\"Bash(wc *)\" \"Bash(awk *)\" \"Bash(file *)\" "
+                 "Read Glob Grep Edit Write",
+                 task_model_flag(app));
+        int tab = open_task(app, s->project, s->cwd, "документы", cmd);
+        if (tab >= 0) {
+            session_activate(&app->sessions, was);
+            resize_all(app);
+            save_layout(app);
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "Документы описываются — задача видна в панели и на этой странице");
+        } else {
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
+        }
+        break;
+    }
 
     case PAGE_EVENT_SKILL_OPEN:
     case PAGE_EVENT_SKILL_EDIT: {

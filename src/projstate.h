@@ -17,6 +17,7 @@
 #include "journal.h"
 #include "tasks.h"
 #include "skills.h"
+#include "files.h"
 
 typedef struct {
     char     cwd[512];
@@ -24,6 +25,7 @@ typedef struct {
     Journal  journal;
     TaskList tasks;
     SkillList skills;
+    FileList files;     // реестр документов .berth/files.tsv
     time_t   touched;   // когда набор последний раз спрашивали
     time_t   journal_mtime;   // .berth/journal.md на момент чтения ленты
 } ProjectState;
