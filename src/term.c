@@ -498,6 +498,16 @@ static bool match_status(const char *line, const void *arg)
     p += len;
     if (*p == '?') p++;             // многоточие
     while (*p == ' ') p++;
+    // Долгое сжатие получает таймер: «Compacting conversation… (45s)»,
+    // дальше «(1m 5s)». Внутри скобок — только время; счётчик токенов
+    // и остальное — уже другая строка крутилки.
+    if (*p == '(') {
+        p++;
+        while (*p && strchr("0123456789 hms", *p)) p++;
+        if (*p != ')') return false;
+        p++;
+        while (*p == ' ') p++;
+    }
     return *p == '\0';
 }
 
