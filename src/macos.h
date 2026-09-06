@@ -12,6 +12,9 @@ void macos_release_window_shortcuts(void);
 // Выводит окно на передний план: запущенный из терминала процесс без бандла
 // иначе открывается позади активного приложения.
 void macos_activate_app(void);
+// Иконка процесса в доке — из PNG в памяти. Бандлу не нужна, голому
+// бинарю без неё достаётся заглушка.
+void macos_set_dock_icon(const unsigned char *png, size_t len);
 
 // Модификаторы, нажатые прямо сейчас, по данным системы. Биты ниже.
 #define MACOS_MOD_SHIFT (1u << 0)

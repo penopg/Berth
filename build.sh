@@ -67,6 +67,28 @@ if [ ! -f "$RAYLIB_LIB" ]; then
     [ -f "$RAYLIB_LIB" ] || die "libraylib.a не появилась"
 fi
 
+# --- иконка в заголовок ------------------------------------------------------
+# Голый бинарь (build/berth, berth-stable) запускается из терминала и иконку
+# из Berth.app не получает — в доке была заглушка. Поэтому картинка едет в
+# самом бинаре, как шрифт, и ставится в док при старте (macos_set_dock_icon).
+# 512 px хватает: док крупнее не рисует, а 1024 добавляли бы 200 КБ.
+ICON_HEADER="$OUT/icon_png.h"
+if [ ! -f "$ICON_HEADER" ] || [ "$ROOT/assets/make_icon.py" -nt "$ICON_HEADER" ]; then
+    say "вшиваю иконку в заголовок"
+    python3 "$ROOT/assets/make_icon.py" "$OUT/berth-1024.png" >/dev/null
+    sips -z 512 512 "$OUT/berth-1024.png" --out "$OUT/berth-512.png" >/dev/null
+    python3 - "$OUT/berth-512.png" "$ICON_HEADER" <<'PY'
+import sys
+data = open(sys.argv[1], 'rb').read()
+with open(sys.argv[2], 'w') as f:
+    f.write("// Сгенерировано build.sh. Не редактировать.\n")
+    f.write("static const unsigned char icon_png[] = {\n")
+    for i in range(0, len(data), 16):
+        f.write("    " + ",".join("0x%02x" % b for b in data[i:i+16]) + ",\n")
+    f.write("};\n")
+PY
+fi
+
 # --- шрифт в заголовок -------------------------------------------------------
 FONT_HEADER="$OUT/font_jetbrains_mono.h"
 CP_HEADER="$OUT/font_codepoints.h"

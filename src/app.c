@@ -30,6 +30,7 @@
 #include "skills.h"
 #if defined(__APPLE__)
 #include "macos.h"
+#include "icon_png.h"
 #endif
 
 // Отступ от краёв области терминала до сетки символов, в пикселях.
@@ -1503,6 +1504,7 @@ int main(int argc, char **argv)
     // процесс мимо уборки дочерних оболочек.
     macos_release_window_shortcuts();
     macos_activate_app();
+    macos_set_dock_icon(icon_png, sizeof(icon_png));
 #endif
 
     App app = {0};

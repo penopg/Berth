@@ -38,6 +38,13 @@ void macos_activate_app(void)
     [NSApp activateIgnoringOtherApps:YES];
 }
 
+void macos_set_dock_icon(const unsigned char *png, size_t len)
+{
+    NSData *data = [NSData dataWithBytesNoCopy:(void *)png length:len freeWhenDone:NO];
+    NSImage *image = [[NSImage alloc] initWithData:data];
+    if (image) [NSApp setApplicationIconImage:image];
+}
+
 // Вставка картинки. Claude Code принимает изображение путём к файлу — так же,
 // как при перетаскивании, — поэтому терминалу достаточно выложить содержимое
 // буфера на диск и напечатать путь. Текстовый буфер сюда не попадает: его
