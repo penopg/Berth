@@ -89,6 +89,18 @@ with open(sys.argv[2], 'w') as f:
 PY
 fi
 
+# --- спрайты каратеки --------------------------------------------------------
+# Раскладки из assets/sprites режутся на кадры и едут в бинарь атласом
+# (sprite.c); сценку по ним разыгрывает scene.c. Тот же заголовок собирает
+# tools/arena.sh для отдельного окна-арены.
+SPRITES_HEADER="$OUT/sprites_data.h"
+if [ ! -f "$SPRITES_HEADER" ] || [ "$ROOT/assets/sprites/slice.py" -nt "$SPRITES_HEADER" ] \
+   || [ "$ROOT/assets/sprites/hero.png" -nt "$SPRITES_HEADER" ] \
+   || [ "$ROOT/assets/sprites/enemy.png" -nt "$SPRITES_HEADER" ]; then
+    say "режу спрайты"
+    python3 "$ROOT/assets/sprites/slice.py" "$SPRITES_HEADER"
+fi
+
 # --- шрифт в заголовок -------------------------------------------------------
 FONT_HEADER="$OUT/font_jetbrains_mono.h"
 CP_HEADER="$OUT/font_codepoints.h"
