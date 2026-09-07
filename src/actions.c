@@ -94,11 +94,15 @@ bool actions_changed(const ActionList *al, const char *cwd)
     return file_mtime(path) != al->mtime;
 }
 
+// Известно ли имя. Пустая ячейка известной не считается: подставлять
+// пустоту незачем — «оценка , впечатление ,» это не реплика, а мусор.
+// Значит колонка есть, но значения нет, и его надо спросить у человека.
 static bool known(const char *name, size_t len, const char *const *names,
                   const char *const *values, int n, const char **val)
 {
     for (int i = 0; i < n; i++) {
         if (strlen(names[i]) != len || strncmp(names[i], name, len)) continue;
+        if (!values[i] || !values[i][0]) return false;
         *val = values[i];
         return true;
     }
