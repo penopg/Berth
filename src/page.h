@@ -61,6 +61,11 @@ typedef enum {
     PAGE_EVENT_NEW_SKILL,        // завести скилл; title — имя, body — когда применять
     // Документы из реестра .berth/files.tsv. arg — номер строки реестра.
     PAGE_EVENT_FILE_TOGGLE,      // раскрыть или свернуть документ
+    PAGE_EVENT_FILE_SHOW,        // показывать таблицу на странице или нет
+    PAGE_EVENT_TABLE_SORT,       // сортировать таблицу arg по колонке arg2
+    PAGE_EVENT_TABLE_ROW,        // раскрыть запись arg2 таблицы arg
+    PAGE_EVENT_TABLE_ALL,        // показать все записи таблицы arg
+    PAGE_EVENT_TABLE_OPEN,       // открыть файл таблицы arg
     PAGE_EVENT_FILE_OPEN,        // открыть файл штатно
     PAGE_EVENT_FILE_REVEAL,      // показать файл в Finder
     PAGE_EVENT_DESCRIBE_FILES,   // описать все неописанные документы скиллом berth-files

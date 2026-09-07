@@ -1012,6 +1012,64 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         break;
     }
 
+    // Тумблер «показывать на странице»: список пишется в проект
+    // (.berth/shown.tsv), таблица подхватывается тут же — ждать опроса
+    // значит нажать и ничего не увидеть.
+    case PAGE_EVENT_FILE_SHOW: {
+        ProjectState *st = projstate_edit(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->files.count) break;
+        const char *rel = st->files.items[ev.arg].path;
+        bool was = files_shown(&st->files, rel);
+        if (!files_show_toggle(&st->files, s->cwd, rel)) {
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "показать не вышло: на странице уже две таблицы");
+            break;
+        }
+        projstate_sync_tables(s->cwd);
+        // Взгляд на новую таблицу начинается с чистого листа: чужая
+        // сортировка и раскрытая запись к ней не относятся.
+        for (int i = 0; i < FILES_SHOWN_MAX; i++) {
+            s->page_table_sort[i] = 0;
+            s->page_table_row[i] = 0;
+        }
+        s->page_table_all = 0;
+        snprintf(s->page_notice, sizeof(s->page_notice), was ? "%s убрана со страницы"
+                                                             : "%s показана на странице", rel);
+        break;
+    }
+
+    case PAGE_EVENT_TABLE_SORT: {
+        if (ev.arg < 0 || ev.arg >= FILES_SHOWN_MAX) break;
+        int *sort = &s->page_table_sort[ev.arg];
+        int col = ev.arg2 + 1;
+        // По кругу: по возрастанию, по убыванию, как в файле.
+        if (*sort == col)       *sort = -col;
+        else if (*sort == -col) *sort = 0;
+        else                    *sort = col;
+        s->page_table_row[ev.arg] = 0;
+        break;
+    }
+
+    case PAGE_EVENT_TABLE_ROW:
+        if (ev.arg < 0 || ev.arg >= FILES_SHOWN_MAX) break;
+        s->page_table_row[ev.arg] =
+            (s->page_table_row[ev.arg] == ev.arg2 + 1) ? 0 : ev.arg2 + 1;
+        break;
+
+    case PAGE_EVENT_TABLE_ALL:
+        if (ev.arg < 0 || ev.arg >= FILES_SHOWN_MAX) break;
+        s->page_table_all ^= 1u << ev.arg;
+        break;
+
+    case PAGE_EVENT_TABLE_OPEN: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->table_count) break;
+        char target[PROJECT_PATH_MAX + FILE_PATH_MAX + 2];
+        snprintf(target, sizeof(target), "%s/%s", s->cwd, st->tables[ev.arg].path);
+        open_with(target, NULL);
+        break;
+    }
+
     case PAGE_EVENT_UNDESC_TOGGLE:
         s->page_undesc_open = !s->page_undesc_open;
         break;

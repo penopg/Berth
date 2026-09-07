@@ -18,6 +18,7 @@
 #include "tasks.h"
 #include "skills.h"
 #include "files.h"
+#include "table.h"
 
 typedef struct {
     char     cwd[512];
@@ -26,6 +27,10 @@ typedef struct {
     TaskList tasks;
     SkillList skills;
     FileList files;     // реестр документов .berth/files.tsv
+    // Таблицы, показанные на странице: читаются целиком, перечитываются по
+    // mtime тем же опросом, что задачи и реестр.
+    Table    tables[FILES_SHOWN_MAX];
+    int      table_count;
     time_t   touched;   // когда набор последний раз спрашивали
     time_t   journal_mtime;   // .berth/journal.md на момент чтения ленты
 } ProjectState;
@@ -51,6 +56,10 @@ void projstate_reload(const char *cwd);
 // путь родителя у подпроекта, иначе NULL). Перечитываются по mtime папок,
 // не чаще раза в пару секунд; force — перечитать сейчас, после своей правки.
 const SkillList *projstate_skills(const char *cwd, const char *parent, bool force);
+
+// Свести показанные таблицы со списком в реестре: после тумблера — сразу,
+// чтобы таблица появилась в том же кадре, а не через опрос.
+void projstate_sync_tables(const char *cwd);
 
 // Заметить правки задач на диске: агент отмечает сделанное прямо в файле.
 // Дешёвый опрос — по stat на проект, — зовётся раз в пару секунд.

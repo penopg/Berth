@@ -41,6 +41,9 @@ static void load(ProjectState *st, const char *cwd)
     st->journal_mtime = journal_file_mtime(cwd);
     tasks_load(&st->tasks, cwd);
     files_load(&st->files, cwd);
+    for (int i = 0; i < st->files.shown_count; i++)
+        table_load(&st->tables[i], cwd, st->files.shown[i]);
+    st->table_count = st->files.shown_count;
 }
 
 ProjectState *projstate_edit(const char *cwd)
@@ -88,6 +91,29 @@ const SkillList *projstate_skills(const char *cwd, const char *parent, bool forc
     return &st->skills;
 }
 
+// Что показано на странице, решает реестр; таблицы под него подстраиваются.
+// Путь сменился или файл правили — перечитываем, иначе не трогаем: разбор
+// стоит чтения файла, а опрос идёт раз в пару секунд.
+static void sync_tables(ProjectState *st)
+{
+    const FileList *fl = &st->files;
+    for (int i = 0; i < fl->shown_count; i++) {
+        if (strcmp(st->tables[i].path, fl->shown[i]))
+            table_load(&st->tables[i], st->cwd, fl->shown[i]);
+        else if (table_changed(&st->tables[i], st->cwd))
+            table_load(&st->tables[i], st->cwd, fl->shown[i]);
+    }
+    for (int i = fl->shown_count; i < FILES_SHOWN_MAX; i++)
+        if (st->tables[i].path[0]) memset(&st->tables[i], 0, sizeof(st->tables[i]));
+    st->table_count = fl->shown_count;
+}
+
+void projstate_sync_tables(const char *cwd)
+{
+    ProjectState *st = projstate_edit(cwd);
+    if (st) sync_tables(st);
+}
+
 void projstate_poll(void)
 {
     for (int i = 0; i < PROJSTATE_MAX; i++) {
@@ -101,6 +127,7 @@ void projstate_poll(void)
             files_load(&st->files, st->cwd);
         else
             files_refresh(&st->files, st->cwd);
+        sync_tables(st);
         projinfo_refresh_summary(&st->info);
         // Дневник дописал агент (задача сбора кончилась) или человек:
         // лента перечитывается сама, кнопка «Обновить» для этого не нужна.

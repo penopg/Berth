@@ -11,6 +11,8 @@ static const double SCAN_EVERY = 30.0;   // секунд между обхода
 static const int    SCAN_LIMIT = 6000;   // записей каталога за обход
 static const int    SCAN_DEPTH = 6;
 
+static const char *base_of(const char *rel);
+
 static void files_path(const char *cwd, char *out, size_t cap)
 {
     snprintf(out, cap, "%s/%s", cwd, FILES_FILE);
@@ -30,6 +32,82 @@ static void rtrim(char *s)
         s[--n] = '\0';
 }
 
+static void shown_path(const char *cwd, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s/%s", cwd, FILES_SHOWN_FILE);
+}
+
+static void shown_load(FileList *fl, const char *cwd)
+{
+    fl->shown_count = 0;
+    char path[700];
+    shown_path(cwd, path, sizeof(path));
+    fl->shown_mtime = file_mtime(path);
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+    char line[FILE_PATH_MAX + 64];
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#') continue;
+        char *tab = strchr(line, '\t');
+        if (!tab) continue;
+        *tab = '\0';
+        if (strcmp(line, "show")) continue;
+        if (fl->shown_count >= FILES_SHOWN_MAX) break;
+        char *p = tab + 1;
+        if (!strncmp(p, "./", 2)) p += 2;
+        snprintf(fl->shown[fl->shown_count], FILE_PATH_MAX, "%s", p);
+        rtrim(fl->shown[fl->shown_count]);
+        if (fl->shown[fl->shown_count][0]) fl->shown_count++;
+    }
+    fclose(f);
+}
+
+bool files_is_table(const char *rel)
+{
+    const char *dot = strrchr(base_of(rel), '.');
+    return dot && !strcasecmp(dot, ".tsv");
+}
+
+bool files_shown(const FileList *fl, const char *rel)
+{
+    for (int i = 0; i < fl->shown_count; i++)
+        if (!strcmp(fl->shown[i], rel)) return true;
+    return false;
+}
+
+bool files_show_toggle(FileList *fl, const char *cwd, const char *rel)
+{
+    if (!cwd || !*cwd || !rel || !*rel) return false;
+
+    int at = -1;
+    for (int i = 0; i < fl->shown_count; i++)
+        if (!strcmp(fl->shown[i], rel)) at = i;
+    if (at >= 0) {
+        for (int i = at; i + 1 < fl->shown_count; i++)
+            memcpy(fl->shown[i], fl->shown[i + 1], FILE_PATH_MAX);
+        fl->shown_count--;
+    } else {
+        if (fl->shown_count >= FILES_SHOWN_MAX) return false;
+        snprintf(fl->shown[fl->shown_count++], FILE_PATH_MAX, "%s", rel);
+    }
+
+    char dir[700], path[700], tmp[720];
+    snprintf(dir, sizeof(dir), "%s/.berth", cwd);
+    mkdir(dir, 0755);
+    shown_path(cwd, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return false;
+    fprintf(f, "# Таблицы, показанные на странице проекта. Ставит берт "
+               "тумблером у документа.\n");
+    for (int i = 0; i < fl->shown_count; i++)
+        fprintf(f, "show\t%s\n", fl->shown[i]);
+    fclose(f);
+    if (rename(tmp, path) != 0) { remove(tmp); return false; }
+    fl->shown_mtime = file_mtime(path);
+    return true;
+}
+
 void files_load(FileList *fl, const char *cwd)
 {
     memset(fl, 0, sizeof(*fl));
@@ -38,6 +116,7 @@ void files_load(FileList *fl, const char *cwd)
 
     char path[700];
     files_path(cwd, path, sizeof(path));
+    shown_load(fl, cwd);
     FILE *f = fopen(path, "r");
     if (!f) { files_refresh(fl, cwd); return; }   // реестра нет — но папку смотрим
     fl->exists = true;
@@ -68,7 +147,9 @@ bool files_changed(const FileList *fl, const char *cwd)
     if (!cwd || !*cwd) return false;
     char path[700];
     files_path(cwd, path, sizeof(path));
-    return file_mtime(path) != fl->mtime;
+    if (file_mtime(path) != fl->mtime) return true;
+    shown_path(cwd, path, sizeof(path));
+    return file_mtime(path) != fl->shown_mtime;
 }
 
 // --- что считается документом ----------------------------------------------------

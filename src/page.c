@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -1497,6 +1498,28 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
                 if (button(c, "Открыть", true)) set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
                 if (button(c, "Папка", false))  set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
                 row_end(c);
+
+                // Таблицу можно показывать прямо на странице — тогда её не
+                // надо открывать, чтобы вспомнить, что в ней. Мест немного:
+                // страница не витрина файлов, а рабочее место.
+                if (files_is_table(e->path)) {
+                    bool on = files_shown(fl, e->path);
+                    bool room = on || fl->shown_count < FILES_SHOWN_MAX;
+                    row_begin(c);
+                    c->row_x = c->x + cw * 2;
+                    const char *label = "Показывать на странице";
+                    int lw = chars_of(label) * cw;
+                    ui_text_clipped(c->font, label, c->row_x, c->y + 6,
+                                    c->theme->row_text_dim, lw);
+                    c->row_x += lw + cw;
+                    if (room) {
+                        if (toggle(c, on)) set_event(c, PAGE_EVENT_FILE_SHOW, i, NULL);
+                    } else {
+                        ui_text_clipped(c->font, "уже показаны две", c->row_x, c->y + 6,
+                                        c->theme->row_text_dim, cw * 20);
+                    }
+                    row_end(c);
+                }
             } else {
                 text(c, "файла на месте нет — строку реестра пора убрать", c->theme->row_text_dim);
             }
@@ -1570,6 +1593,201 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
         if (button(c, fl->undescribed > 1 ? "Описать все" : "Описать", false))
             set_event(c, PAGE_EVENT_DESCRIBE_FILES, 0, NULL);
         row_end(c);
+    }
+}
+
+// --- таблица на странице -----------------------------------------------------
+
+// Показанная таблица — ответ на «что у нас есть», который иначе приходится
+// открывать в Excel. Работы над ней ровно три: посмотреть, отсортировать по
+// колонке и раскрыть запись целиком. Правится она по-прежнему в файле —
+// руками или агентом, — а страница только показывает: редактор таблицы это
+// другой продукт, и заводить его ради взгляда на двенадцать строк незачем.
+
+static const Table *g_sort_table;
+static int  g_sort_col;
+static bool g_sort_desc;
+
+static int cmp_rows(const void *pa, const void *pb)
+{
+    int a = *(const int *)pa, b = *(const int *)pb;
+    const char *x = g_sort_table->cells[a][g_sort_col];
+    const char *y = g_sort_table->cells[b][g_sort_col];
+    // Пустое — всегда внизу, в обе стороны: неизвестное значение по формату
+    // оставляют пустым, и всплывать наверх ему незачем.
+    if (!*x || !*y) {
+        if (!*x && !*y) return a - b;
+        return !*x ? 1 : -1;
+    }
+    int r;
+    if (g_sort_table->col_num[g_sort_col]) {
+        double dx = atof(x), dy = atof(y);
+        r = dx < dy ? -1 : dx > dy ? 1 : 0;
+    } else {
+        // Побайтово: UTF-8 хранит порядок кодпоинтов, и кириллица так
+        // выстраивается по алфавиту. Регистр и латиница идут отдельными
+        // кучами — для взгляда на список это терпимо.
+        r = strcmp(x, y);
+    }
+    if (r == 0) return a - b;   // равные держат порядок файла
+    return g_sort_desc ? -r : r;
+}
+
+static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
+{
+    const int cw = c->font->cell_width;
+    const Theme *th = c->theme;
+
+    char head[160];
+    if (t->exists)
+        snprintf(head, sizeof(head), "%s · %d %s", t->name, t->file_rows,
+                 plural3(t->file_rows, "запись", "записи", "записей"));
+    else
+        snprintf(head, sizeof(head), "%s", t->name);
+    if (section_action(c, head, "Открыть"))
+        set_event(c, PAGE_EVENT_TABLE_OPEN, idx, NULL);
+
+    if (!t->exists) {
+        text(c, "таблица не читается — файла нет или в нём нет заголовков",
+             th->row_text_dim);
+        return;
+    }
+
+    // Ширина колонки — по содержимому, но не больше 24 знаков: одна длинная
+    // заметка иначе съедает строку целиком. Колонки, не влезшие в ширину
+    // раздела, отбрасываются справа — запись целиком открывается по клику.
+    int avail = content_width(c) / cw;
+    int w[TABLE_COLS_MAX];
+    int cols = 0, used = 0;
+    for (int i = 0; i < t->col_count; i++) {
+        int cwid = t->col_chars[i];
+        if (cwid > 24) cwid = 24;
+        if (cwid < 3) cwid = 3;
+        if (cols > 0 && used + cwid > avail) break;
+        w[i] = cwid;
+        used += cwid + 2;
+        cols++;
+    }
+
+    int sort = s->page_table_sort[idx];
+    int sort_col = sort > 0 ? sort - 1 : sort < 0 ? -sort - 1 : -1;
+
+    // Заголовки — они же кнопки сортировки: клик по колонке ведёт по кругу
+    // «по возрастанию — по убыванию — как в файле». Стрелка показывает, где
+    // мы сейчас, иначе третье состояние не отличить от первого.
+    {
+        int x = c->x;
+        for (int i = 0; i < cols; i++) {
+            int cell = w[i] * cw;
+            Rect r = { x - 4, c->y - 3, cell + 8, c->line + 4 };
+            bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+            if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
+            bool active = i == sort_col;
+            int room = cell;
+            if (active) {
+                font_draw_codepoint(c->font, sort > 0 ? 0x25B4 : 0x25BE,
+                                    (float)(x + cell - cw), (float)c->y,
+                                    (float)c->font->size, th->progress_fill);
+                room -= cw;
+            }
+            ui_text_clipped(c->font, t->cols[i], x, c->y,
+                            active ? th->progress_fill : th->group_label, room);
+            if (hover && c->click) {
+                set_event(c, PAGE_EVENT_TABLE_SORT, idx, NULL);
+                c->event.arg2 = i;
+            }
+            x += cell + cw * 2;
+        }
+        c->y += c->line;
+        DrawRectangle(c->x, c->y - 3, content_width(c), 1, th->sidebar_border);
+        c->y += 3;
+    }
+
+    // Порядок строк: показанный, а не файловый. Сортировка идёт по индексам,
+    // сами ячейки не двигаются — файл принадлежит человеку.
+    static int order[TABLE_ROWS_MAX];
+    for (int i = 0; i < t->row_count; i++) order[i] = i;
+    if (sort_col >= 0 && sort_col < t->col_count) {
+        g_sort_table = t;
+        g_sort_col = sort_col;
+        g_sort_desc = sort < 0;
+        qsort(order, (size_t)t->row_count, sizeof(order[0]), cmp_rows);
+    }
+
+    bool all = (s->page_table_all >> idx) & 1u;
+    int limit = all ? t->row_count : (t->row_count < 8 ? t->row_count : 8);
+    int open_row = s->page_table_row[idx] - 1;
+
+    for (int k = 0; k < limit; k++) {
+        int r = order[k];
+        bool open = r == open_row;
+        Rect rr = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 4 };
+        bool hover = inside(rr, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(rr.x, rr.y, rr.w, rr.h, th->row_hover_bg);
+        int row_top = rr.y;
+
+        int x = c->x;
+        for (int i = 0; i < cols; i++) {
+            const char *v = t->cells[r][i];
+            int cell = w[i] * cw;
+            int tw = chars_of(v) * cw;
+            // Числа — по правому краю: так видно порядок величины.
+            int tx = (t->col_num[i] && tw < cell) ? x + cell - tw : x;
+            ui_text_clipped(c->font, v, tx, c->y,
+                            i == 0 ? th->row_text : th->row_text_dim, cell);
+            x += cell + cw * 2;
+        }
+        c->y += c->line;
+        if (hover && c->click) {
+            set_event(c, PAGE_EVENT_TABLE_ROW, idx, NULL);
+            c->event.arg2 = r;
+        }
+
+        // Раскрытая запись — все колонки, включая отброшенные справа: ради
+        // них клик и нужен.
+        if (open) {
+            gap(c, 0);
+            for (int i = 0; i < t->col_count; i++) {
+                if (!t->cells[r][i][0]) continue;
+                char line_text[TABLE_CELL_MAX * 2];
+                snprintf(line_text, sizeof(line_text), "%s: ", t->cols[i]);
+                int lw = ui_text_clipped(c->font, line_text, c->x + cw * 2, c->y,
+                                         th->row_text_dim, content_width(c) - cw * 2);
+                ui_text_clipped(c->font, t->cells[r][i], c->x + cw * 2 + lw, c->y,
+                                th->row_text, content_width(c) - cw * 2 - lw);
+                c->y += c->line;
+            }
+            reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
+            gap(c, 1);
+        }
+    }
+
+    if (t->row_count > limit || t->file_rows > t->row_count) {
+        gap(c, 1);
+        char more[96];
+        if (t->row_count > limit)
+            snprintf(more, sizeof(more), "Показать все · %d", t->row_count);
+        else
+            snprintf(more, sizeof(more), "В файле ещё %d — на странице первые %d",
+                     t->file_rows - t->row_count, t->row_count);
+        if (t->row_count > limit) {
+            row_begin(c);
+            if (button(c, more, false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+            row_end(c);
+        } else {
+            text(c, more, th->row_text_dim);
+        }
+    } else if (all && t->row_count > 8) {
+        row_begin(c);
+        if (button(c, "Свернуть", false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+        row_end(c);
+    }
+
+    if (cols < t->col_count || t->wide) {
+        char note[128];
+        snprintf(note, sizeof(note), "колонок больше, чем влезло — клик по записи "
+                                     "показывает её целиком");
+        text(c, note, th->row_text_dim);
     }
 }
 
@@ -1922,6 +2140,13 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     c.col_w = left_w;
 
     draw_summary(&c, info);
+
+    // Показанные таблицы — между сводкой и журналом, в широкой колонке:
+    // таблице нужна ширина, а справа она встала бы в 2/5 экрана и
+    // растеряла бы колонки.
+    for (int i = 0; i < st->table_count; i++)
+        draw_table(&c, s, &st->tables[i], i);
+
     draw_journal(&c, s, &st->journal, info);
 
     int left_end = c.y;
