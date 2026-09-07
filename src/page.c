@@ -1518,6 +1518,21 @@ static bool section_toggle(Ctx *c, const char *title, bool open)
 // значило бы вытеснить оттуда то, с чем работают.
 static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projects)
 {
+    // Свой заголовок нужен даже когда подпроектов нет: без него «+ Новый
+    // подпроект» висел под задачами и читался их кнопкой.
+    int subs = 0;
+    for (int k = 0; projects && k < projects->count; k++) {
+        const Project *sub = &projects->items[k];
+        if (sub->parent >= 0 && !strcmp(projects->items[sub->parent].path, s->cwd)) subs++;
+    }
+    char head[64];
+    snprintf(head, sizeof(head), subs ? "Подпроекты · %d" : "Подпроекты", subs);
+    section_help(c, head, NULL,
+                 "Папки внутри проекта, где идёт своя работа: у них свой "
+                 "разговор с агентом, свои задачи и паспорт. Берт находит их "
+                 "по истории Claude Code, CLAUDE.md или .berth внутри; "
+                 "исключения — в .berth/subprojects.tsv.");
+
     int q = 0;
     for (int k = 0; projects && k < projects->count; k++) {
         const Project *sub = &projects->items[k];
