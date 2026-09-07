@@ -122,7 +122,8 @@ static void gap(Ctx *c, int lines)
 // чужому. Раньше эти числа стояли по месту, и разделы читались сплошняком.
 enum {
     SP_SECTION = 22,   // перед заголовком раздела — самый большой отступ
-    SP_HEAD    = 6,    // от черты заголовка до первой строки
+    SP_HEAD    = 10,   // от черты заголовка до первой строки: подсветка
+                       // первой строки не должна упираться в черту
     SP_ROW     = 4,    // между строками списка
     SP_BLOCK   = 10,   // между строкой и её раскрытым содержимым
 };
@@ -1508,7 +1509,10 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
     for (int i = 0; i < al->count; i++) {
         const Action *a = &al->items[i];
         bool open = s->page_action_open == i + 1;
-        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * 2 + 6 };
+        // Подсветка ровно по строке: у раскрытого действия вторая строка —
+        // это уже его текст, и подложка висела бы над ним куском.
+        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16,
+                   c->line * (open ? 1 : 2) + 6 };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
 
