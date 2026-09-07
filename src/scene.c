@@ -140,7 +140,15 @@ static void hero_leave(Scene *sc)
 static bool hero_ready(Scene *sc)
 {
     if (sc->hero_phase == HERO_STAY) return true;
-    if (sc->hero_phase == HERO_NONE || sc->hero_phase == HERO_LEAVE) hero_enter(sc);
+    if (sc->hero_phase == HERO_NONE) hero_enter(sc);
+    // Уходящий разворачивается с места: после победы он уходит сразу, и
+    // новая работа часто застаёт его на полпути — прыжок к дальнему краю
+    // читался бы как подмена.
+    if (sc->hero_phase == HERO_LEAVE) {
+        sc->hero_phase = HERO_ENTER;
+        sc->hero.flip = false;
+        play_range(&sc->hero, SPR_WALK, 0, 9, WALK_FRAME, true);
+    }
     return false;
 }
 
@@ -393,11 +401,19 @@ void scene_update(Scene *sc, float dt)
         }
         break;
 
-    case SCENE_WIN:
-        // Ликование не вечно: через несколько секунд герой снова в стойке,
-        // а поверженный противник лежит, пока не пропадёт.
-        if (sc->clock > 3.5f && playing(&sc->hero, SPR_VICTORY)) play_stance(&sc->hero);
+    case SCENE_WIN: {
+        // Помахал — поклонился — ушёл, не задерживаясь: работа кончилась,
+        // и стоять в стойке над лежащим герою незачем. Поклон один раз, без
+        // выдержки, как у зова; кончился — уходит сразу, не дожидаясь
+        // IDLE_LEAVE (тот считает противника на сцене делом, а он ещё лежит).
+        static const int   bf[] = { 0, 1, 2, 1, 0 };
+        static const float bd[] = { 0.12f, 0.12f, 0.7f, 0.12f, 0.4f };
+        if (sc->clock > 2.0f && playing(&sc->hero, SPR_VICTORY))
+            play_seq(&sc->hero, SPR_BOW, bf, bd, 5, false);
+        if (sc->hero_phase == HERO_STAY && sc->hero.anim == SPR_BOW && sc->hero.done)
+            hero_leave(sc);
         break;
+    }
 
     case SCENE_COMPACT:
         // Шаг вправо до края ячейки, разворот, шаг влево — и так, пока
