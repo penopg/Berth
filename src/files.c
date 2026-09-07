@@ -45,7 +45,7 @@ static void shown_load(FileList *fl, const char *cwd)
     fl->shown_mtime = file_mtime(path);
     FILE *f = fopen(path, "r");
     if (!f) return;
-    char line[FILE_PATH_MAX + 64];
+    char line[FILE_PATH_MAX + FILE_NOTE_MAX + 64];
     while (fgets(line, sizeof(line), f)) {
         if (line[0] == '#') continue;
         char *tab = strchr(line, '\t');
@@ -54,12 +54,39 @@ static void shown_load(FileList *fl, const char *cwd)
         if (strcmp(line, "show")) continue;
         if (fl->shown_count >= FILES_SHOWN_MAX) break;
         char *p = tab + 1;
+        // Третье поле — выбранные колонки; его может не быть.
+        char *cols = strchr(p, '\t');
+        if (cols) *cols++ = '\0';
         if (!strncmp(p, "./", 2)) p += 2;
         snprintf(fl->shown[fl->shown_count], FILE_PATH_MAX, "%s", p);
         rtrim(fl->shown[fl->shown_count]);
+        snprintf(fl->shown_cols[fl->shown_count], FILE_NOTE_MAX, "%s", cols ? cols : "");
+        rtrim(fl->shown_cols[fl->shown_count]);
         if (fl->shown[fl->shown_count][0]) fl->shown_count++;
     }
     fclose(f);
+}
+
+static bool shown_write(FileList *fl, const char *cwd)
+{
+    char dir[700], path[700], tmp[720];
+    snprintf(dir, sizeof(dir), "%s/.berth", cwd);
+    mkdir(dir, 0755);
+    shown_path(cwd, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return false;
+    fprintf(f, "# Таблицы, показанные на странице проекта: путь и колонки "
+               "через «|». Ставит берт.\n");
+    for (int i = 0; i < fl->shown_count; i++) {
+        fprintf(f, "show\t%s", fl->shown[i]);
+        if (fl->shown_cols[i][0]) fprintf(f, "\t%s", fl->shown_cols[i]);
+        fputc('\n', f);
+    }
+    fclose(f);
+    if (rename(tmp, path) != 0) { remove(tmp); return false; }
+    fl->shown_mtime = file_mtime(path);
+    return true;
 }
 
 bool files_is_table(const char *rel)
@@ -83,29 +110,29 @@ bool files_show_toggle(FileList *fl, const char *cwd, const char *rel)
     for (int i = 0; i < fl->shown_count; i++)
         if (!strcmp(fl->shown[i], rel)) at = i;
     if (at >= 0) {
-        for (int i = at; i + 1 < fl->shown_count; i++)
+        for (int i = at; i + 1 < fl->shown_count; i++) {
             memcpy(fl->shown[i], fl->shown[i + 1], FILE_PATH_MAX);
+            memcpy(fl->shown_cols[i], fl->shown_cols[i + 1], FILE_NOTE_MAX);
+        }
         fl->shown_count--;
     } else {
         if (fl->shown_count >= FILES_SHOWN_MAX) return false;
-        snprintf(fl->shown[fl->shown_count++], FILE_PATH_MAX, "%s", rel);
+        snprintf(fl->shown[fl->shown_count], FILE_PATH_MAX, "%s", rel);
+        fl->shown_cols[fl->shown_count][0] = '\0';
+        fl->shown_count++;
     }
+    return shown_write(fl, cwd);
+}
 
-    char dir[700], path[700], tmp[720];
-    snprintf(dir, sizeof(dir), "%s/.berth", cwd);
-    mkdir(dir, 0755);
-    shown_path(cwd, path, sizeof(path));
-    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-    FILE *f = fopen(tmp, "w");
-    if (!f) return false;
-    fprintf(f, "# Таблицы, показанные на странице проекта. Ставит берт "
-               "тумблером у документа.\n");
-    for (int i = 0; i < fl->shown_count; i++)
-        fprintf(f, "show\t%s\n", fl->shown[i]);
-    fclose(f);
-    if (rename(tmp, path) != 0) { remove(tmp); return false; }
-    fl->shown_mtime = file_mtime(path);
-    return true;
+bool files_show_cols_set(FileList *fl, const char *cwd, const char *rel,
+                         const char *spec)
+{
+    for (int i = 0; i < fl->shown_count; i++) {
+        if (strcmp(fl->shown[i], rel)) continue;
+        snprintf(fl->shown_cols[i], FILE_NOTE_MAX, "%s", spec ? spec : "");
+        return shown_write(fl, cwd);
+    }
+    return false;
 }
 
 void files_load(FileList *fl, const char *cwd)

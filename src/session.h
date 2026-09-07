@@ -125,6 +125,8 @@ typedef struct {
     int page_table_sort[FILES_SHOWN_MAX];
     int page_table_row[FILES_SHOWN_MAX];
     unsigned page_table_all;
+    // У какой таблицы открыт выбор колонок — битами по номеру.
+    unsigned page_table_cfg;
 
     // Раскрыт ли список документов без пояснения. По умолчанию свёрнут:
     // важно число, имена — по клику.

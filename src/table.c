@@ -149,12 +149,50 @@ void table_load(Table *t, const char *cwd, const char *rel)
     }
     fclose(f);
 
+    for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
+
     // Колонка из одних пустых ячеек числовой не считается: равнять там
     // нечего, а правый край выглядел бы ошибкой.
     for (int i = 0; i < t->col_count; i++) {
         bool any = false;
         for (int r = 0; r < t->row_count && !any; r++) any = t->cells[r][i][0] != '\0';
         if (!any) t->col_num[i] = false;
+    }
+}
+
+void table_set_cols(Table *t, const char *spec)
+{
+    for (int i = 0; i < t->col_count; i++) t->col_show[i] = !spec || !*spec;
+    if (!spec || !*spec) return;
+
+    int on = 0;
+    const char *p = spec;
+    while (*p) {
+        const char *sep = strchr(p, '|');
+        size_t len = sep ? (size_t)(sep - p) : strlen(p);
+        for (int i = 0; i < t->col_count; i++)
+            if (strlen(t->cols[i]) == len && !strncmp(t->cols[i], p, len)) {
+                t->col_show[i] = true;
+                on++;
+            }
+        if (!sep) break;
+        p = sep + 1;
+    }
+    if (!on) for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
+}
+
+void table_cols_spec(const Table *t, char *out, size_t cap)
+{
+    out[0] = '\0';
+    bool all = true;
+    for (int i = 0; i < t->col_count; i++) if (!t->col_show[i]) all = false;
+    if (all) return;
+    size_t used = 0;
+    for (int i = 0; i < t->col_count; i++) {
+        if (!t->col_show[i]) continue;
+        int n = snprintf(out + used, cap - used, "%s%s", used ? "|" : "", t->cols[i]);
+        if (n < 0 || (size_t)n >= cap - used) break;
+        used += (size_t)n;
     }
 }
 

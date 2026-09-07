@@ -54,6 +54,9 @@ typedef struct {
     // очередном «опиши документы» лишняя колонка не пережила бы перезапись.
     // Строки `show\t<путь>`, как у subprojects.tsv.
     char   shown[FILES_SHOWN_MAX][FILE_PATH_MAX];
+    // Какие колонки показывать у этой таблицы: имена через «|», третьим
+    // полем строки. Пусто — все.
+    char   shown_cols[FILES_SHOWN_MAX][FILE_NOTE_MAX];
     int    shown_count;
     time_t shown_mtime;
 } FileList;
@@ -80,5 +83,9 @@ bool files_shown(const FileList *fl, const char *rel);
 // файл и rename, как задачи) и правит список в памяти. false — не вышло:
 // мест уже нет или файл не записался.
 bool files_show_toggle(FileList *fl, const char *cwd, const char *rel);
+
+// Запомнить выбор колонок у показанной таблицы: перезаписывает тот же файл.
+bool files_show_cols_set(FileList *fl, const char *cwd, const char *rel,
+                         const char *spec);
 
 #endif // BERTH_FILES_H

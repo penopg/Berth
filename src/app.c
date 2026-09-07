@@ -1061,6 +1061,41 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_table_all ^= 1u << ev.arg;
         break;
 
+    case PAGE_EVENT_TABLE_CFG:
+        if (ev.arg < 0 || ev.arg >= FILES_SHOWN_MAX) break;
+        s->page_table_cfg ^= 1u << ev.arg;
+        break;
+
+    // Колонка показывается или нет. Выбор — свойство таблицы, а не взгляда
+    // вкладки: он про то, что в этой таблице стоит смотреть, и переживает
+    // закрытие окна. Поэтому едет в .berth/shown.tsv рядом с путём.
+    case PAGE_EVENT_TABLE_COL:
+    case PAGE_EVENT_TABLE_COLS_ALL: {
+        ProjectState *st = projstate_edit(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->table_count) break;
+        Table *t = &st->tables[ev.arg];
+        if (ev.kind == PAGE_EVENT_TABLE_COLS_ALL) {
+            for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
+        } else {
+            if (ev.arg2 < 0 || ev.arg2 >= t->col_count) break;
+            int on = 0;
+            for (int i = 0; i < t->col_count; i++) on += t->col_show[i];
+            // Последнюю колонку погасить нельзя: пустая таблица читалась бы
+            // как сломанная, а вернуть её было бы нечем.
+            if (on == 1 && t->col_show[ev.arg2]) {
+                snprintf(s->page_notice, sizeof(s->page_notice),
+                         "хотя бы одна колонка должна остаться");
+                break;
+            }
+            t->col_show[ev.arg2] = !t->col_show[ev.arg2];
+        }
+        char spec[FILE_NOTE_MAX];
+        table_cols_spec(t, spec, sizeof(spec));
+        files_show_cols_set(&st->files, s->cwd, t->path, spec);
+        s->page_table_row[ev.arg] = 0;
+        break;
+    }
+
     case PAGE_EVENT_TABLE_OPEN: {
         const ProjectState *st = projstate_peek(s->cwd);
         if (!st || ev.arg < 0 || ev.arg >= st->table_count) break;

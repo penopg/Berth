@@ -224,6 +224,34 @@ static bool visible_hit(const Ctx *c, Vector2 p)
 // Действие живёт рядом с тем, на что действует, а не в общем ряду кнопок
 // сверху, где «Обновить сводку» и «Собрать журнал» стояли без контекста.
 // Возвращает true, если по действию нажали.
+// Заголовок с двумя действиями: возвращает 1 или 2 по нажатому. Второе
+// действие стоит левее первого — порядок чтения тот же, что порядок слов.
+static int section_action2(Ctx *c, const char *title, const char *a1, const char *a2)
+{
+    gap(c, 2);
+    int w = content_width(c);
+    int hit = 0;
+    int right = c->x + w;
+    const char *acts[2] = { a1, a2 };
+    for (int i = 0; i < 2; i++) {
+        if (!acts[i]) continue;
+        int aw = chars_of(acts[i]) * c->font->cell_width;
+        Rect r = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+        ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
+                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
+        if (hover && c->click) hit = i + 1;
+        right = r.x - 8;
+    }
+    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label,
+                    right - c->x - 8);
+    c->y += c->line;
+    DrawRectangle(c->x, c->y - 3, content_width(c), 1, c->theme->sidebar_border);
+    gap(c, 1);
+    return hit;
+}
+
 static bool section_action(Ctx *c, const char *title, const char *action)
 {
     gap(c, 2);
@@ -1644,8 +1672,9 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
                  plural3(t->file_rows, "запись", "записи", "записей"));
     else
         snprintf(head, sizeof(head), "%s", t->name);
-    if (section_action(c, head, "Открыть"))
-        set_event(c, PAGE_EVENT_TABLE_OPEN, idx, NULL);
+    int act = section_action2(c, head, "Открыть", "Настроить");
+    if (act == 1) set_event(c, PAGE_EVENT_TABLE_OPEN, idx, NULL);
+    if (act == 2) set_event(c, PAGE_EVENT_TABLE_CFG, idx, NULL);
 
     if (!t->exists) {
         text(c, "таблица не читается — файла нет или в нём нет заголовков",
@@ -1657,16 +1686,40 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
     // заметка иначе съедает строку целиком. Колонки, не влезшие в ширину
     // раздела, отбрасываются справа — запись целиком открывается по клику.
     int avail = content_width(c) / cw;
-    int w[TABLE_COLS_MAX];
-    int cols = 0, used = 0;
+    int col[TABLE_COLS_MAX], w[TABLE_COLS_MAX];
+    int cols = 0, used = 0, chosen = 0;
     for (int i = 0; i < t->col_count; i++) {
+        if (!t->col_show[i]) continue;
+        chosen++;
         int cwid = t->col_chars[i];
         if (cwid > 24) cwid = 24;
         if (cwid < 3) cwid = 3;
-        if (cols > 0 && used + cwid > avail) break;
-        w[i] = cwid;
+        if (cols > 0 && used + cwid > avail) continue;
+        col[cols] = i;
+        w[cols] = cwid;
         used += cwid + 2;
         cols++;
+    }
+
+    // Выбор колонок: чипы по всем колонкам файла, выбранные акцентом.
+    // Скрытая колонка не пропадает совсем — раскрытая запись показывает
+    // все: настройка про то, что видно списком, а не про то, что есть.
+    if ((s->page_table_cfg >> idx) & 1u) {
+        text(c, "Какие колонки показывать списком", th->row_text_dim);
+        row_begin(c);
+        for (int i = 0; i < t->col_count; i++)
+            if (button(c, t->cols[i], t->col_show[i])) {
+                set_event(c, PAGE_EVENT_TABLE_COL, idx, NULL);
+                c->event.arg2 = i;
+            }
+        row_end(c);
+        row_begin(c);
+        if (button(c, "Показать все", false))
+            set_event(c, PAGE_EVENT_TABLE_COLS_ALL, idx, NULL);
+        if (button(c, "Готово", false))
+            set_event(c, PAGE_EVENT_TABLE_CFG, idx, NULL);
+        row_end(c);
+        gap(c, 1);
     }
 
     int sort = s->page_table_sort[idx];
@@ -1677,8 +1730,9 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
     // мы сейчас, иначе третье состояние не отличить от первого.
     {
         int x = c->x;
-        for (int i = 0; i < cols; i++) {
-            int cell = w[i] * cw;
+        for (int k = 0; k < cols; k++) {
+            int i = col[k];
+            int cell = w[k] * cw;
             Rect r = { x - 4, c->y - 3, cell + 8, c->line + 4 };
             bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
             if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
@@ -1727,14 +1781,15 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
         int row_top = rr.y;
 
         int x = c->x;
-        for (int i = 0; i < cols; i++) {
+        for (int k = 0; k < cols; k++) {
+            int i = col[k];
             const char *v = t->cells[r][i];
-            int cell = w[i] * cw;
+            int cell = w[k] * cw;
             int tw = chars_of(v) * cw;
             // Числа — по правому краю: так видно порядок величины.
             int tx = (t->col_num[i] && tw < cell) ? x + cell - tw : x;
             ui_text_clipped(c->font, v, tx, c->y,
-                            i == 0 ? th->row_text : th->row_text_dim, cell);
+                            k == 0 ? th->row_text : th->row_text_dim, cell);
             x += cell + cw * 2;
         }
         c->y += c->line;
@@ -1783,12 +1838,15 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
         row_end(c);
     }
 
-    if (cols < t->col_count || t->wide) {
-        char note[128];
-        snprintf(note, sizeof(note), "колонок больше, чем влезло — клик по записи "
-                                     "показывает её целиком");
-        text(c, note, th->row_text_dim);
-    }
+    // Что не влезло в ширину, из списка выпало молча — об этом надо сказать,
+    // иначе колонка выглядит потерянной. Скрытая настройкой — выбор
+    // человека, о ней не напоминаем.
+    if (cols < chosen || t->wide)
+        text(c, "не все колонки влезли — клик по записи показывает её целиком",
+             th->row_text_dim);
+    else if (chosen < t->col_count)
+        text(c, "часть колонок скрыта настройкой — клик по записи показывает всё",
+             th->row_text_dim);
 }
 
 // Сводка — первое, что видно: что это за проект, где он сейчас и что

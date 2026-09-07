@@ -41,8 +41,10 @@ static void load(ProjectState *st, const char *cwd)
     st->journal_mtime = journal_file_mtime(cwd);
     tasks_load(&st->tasks, cwd);
     files_load(&st->files, cwd);
-    for (int i = 0; i < st->files.shown_count; i++)
+    for (int i = 0; i < st->files.shown_count; i++) {
         table_load(&st->tables[i], cwd, st->files.shown[i]);
+        table_set_cols(&st->tables[i], st->files.shown_cols[i]);
+    }
     st->table_count = st->files.shown_count;
 }
 
@@ -98,10 +100,10 @@ static void sync_tables(ProjectState *st)
 {
     const FileList *fl = &st->files;
     for (int i = 0; i < fl->shown_count; i++) {
-        if (strcmp(st->tables[i].path, fl->shown[i]))
+        if (strcmp(st->tables[i].path, fl->shown[i])
+            || table_changed(&st->tables[i], st->cwd))
             table_load(&st->tables[i], st->cwd, fl->shown[i]);
-        else if (table_changed(&st->tables[i], st->cwd))
-            table_load(&st->tables[i], st->cwd, fl->shown[i]);
+        table_set_cols(&st->tables[i], fl->shown_cols[i]);
     }
     for (int i = fl->shown_count; i < FILES_SHOWN_MAX; i++)
         if (st->tables[i].path[0]) memset(&st->tables[i], 0, sizeof(st->tables[i]));

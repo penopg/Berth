@@ -66,6 +66,9 @@ typedef enum {
     PAGE_EVENT_TABLE_ROW,        // раскрыть запись arg2 таблицы arg
     PAGE_EVENT_TABLE_ALL,        // показать все записи таблицы arg
     PAGE_EVENT_TABLE_OPEN,       // открыть файл таблицы arg
+    PAGE_EVENT_TABLE_CFG,        // открыть или закрыть настройку колонок
+    PAGE_EVENT_TABLE_COL,        // показывать колонку arg2 таблицы arg или нет
+    PAGE_EVENT_TABLE_COLS_ALL,   // показать все колонки таблицы arg
     PAGE_EVENT_FILE_OPEN,        // открыть файл штатно
     PAGE_EVENT_FILE_REVEAL,      // показать файл в Finder
     PAGE_EVENT_DESCRIBE_FILES,   // описать все неописанные документы скиллом berth-files
