@@ -682,6 +682,59 @@ static void say_to_conversation(App *app, Session *s, const char *cwd,
     save_layout(app);
 }
 
+// Отправить агенту готовую реплику. Две дороги, и разница смысловая:
+// результат в файле — задача (вкладка `claude -p` на простой модели, молча,
+// контекст разговора не тратится), результат в ответе — разговор проекта, и
+// туда же уводим человека: он задал вопрос и ждёт ответа. Этим ходят и
+// действия над данными, и просьбы своими словами.
+static void send_prompt(App *app, Session *s, const char *prompt, bool to_task,
+                        const char *name, int cols, int rows)
+{
+    if (!prompt || !*prompt) return;
+
+    if (!to_task) {
+        say_to_conversation(app, s, s->cwd, prompt, cols, rows);
+        int main = session_of_project(&app->sessions, s->cwd);
+        if (main >= 0) {
+            session_activate(&app->sessions, main);
+            resize_all(app);
+        }
+        return;
+    }
+
+    // Текст идёт через файл: в командной строке ему делать нечего —
+    // кавычки, апострофы, «ёлочки».
+    char path[PROJECT_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/prompt.txt", config_dir());
+    FILE *f = fopen(path, "w");
+    if (!f) {
+        snprintf(s->page_notice, sizeof(s->page_notice), "Не удалось записать %s", path);
+        return;
+    }
+    fputs(prompt, f);
+    fclose(f);
+
+    int was = app->sessions.active;
+    char cmd[PROJECT_PATH_MAX + 600];
+    snprintf(cmd, sizeof(cmd),
+             "claude -p \"$(cat '%s')\" --verbose --no-session-persistence%s "
+             "--permission-mode acceptEdits "
+             "--allowed-tools \"Bash(awk *)\" \"Bash(sort *)\" \"Bash(head *)\" "
+             "Read Glob Grep Edit Write WebSearch WebFetch",
+             path, task_model_flag(app));
+    int tab = open_task(app, s->project, s->cwd, name, cmd);
+    if (tab >= 0) {
+        session_activate(&app->sessions, was);
+        resize_all(app);
+        save_layout(app);
+        snprintf(s->page_notice, sizeof(s->page_notice),
+                 "«%s» — задача пошла, видна в панели", name);
+    } else {
+        snprintf(s->page_notice, sizeof(s->page_notice),
+                 "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
+    }
+}
+
 static void handle_page_event(App *app, Session *s, PageEvent ev)
 {
     if (getenv("BERTH_DEBUG_PAGE") && ev.kind)
@@ -1067,54 +1120,15 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         const ProjectState *st = projstate_peek(s->cwd);
         if (!st || ev.arg < 0 || ev.arg >= st->actions.count || !ev.prompt) break;
         const Action *a = &st->actions.items[ev.arg];
-
-        if (!a->to_task) {
-            // Результат в ответе — реплика в разговор проекта, и уводим в
-            // терминал: человек задал вопрос и ждёт ответа.
-            say_to_conversation(app, s, s->cwd, ev.prompt, cols, rows);
-            int main = session_of_project(&app->sessions, s->cwd);
-            if (main >= 0) {
-                session_activate(&app->sessions, main);
-                resize_all(app);
-            }
-            break;
-        }
-
-        // Результат в файле — вкладка-задача на простой модели, молча.
-        // Текст идёт через файл: в командной строке ему делать нечего —
-        // кавычки, апострофы, «ёлочки».
-        char path[PROJECT_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/prompt.txt", config_dir());
-        FILE *f = fopen(path, "w");
-        if (!f) {
-            snprintf(s->page_notice, sizeof(s->page_notice),
-                     "Не удалось записать %s", path);
-            break;
-        }
-        fputs(ev.prompt, f);
-        fclose(f);
-
-        int was = app->sessions.active;
-        char cmd[PROJECT_PATH_MAX + 600];
-        snprintf(cmd, sizeof(cmd),
-                 "claude -p \"$(cat '%s')\" --verbose --no-session-persistence%s "
-                 "--permission-mode acceptEdits "
-                 "--allowed-tools \"Bash(awk *)\" \"Bash(sort *)\" \"Bash(head *)\" "
-                 "Read Glob Grep Edit Write WebSearch WebFetch",
-                 path, task_model_flag(app));
-        int tab = open_task(app, s->project, s->cwd, a->name, cmd);
-        if (tab >= 0) {
-            session_activate(&app->sessions, was);
-            resize_all(app);
-            save_layout(app);
-            snprintf(s->page_notice, sizeof(s->page_notice),
-                     "«%s» — задача пошла, видна в панели", a->name);
-        } else {
-            snprintf(s->page_notice, sizeof(s->page_notice),
-                     "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
-        }
+        send_prompt(app, s, ev.prompt, a->to_task, a->name, cols, rows);
         break;
     }
+
+    // Просьба своими словами: контекст места страница уже приписала.
+    // Дорога та же, что у действия, и выбирает её человек кнопкой.
+    case PAGE_EVENT_ASK_AGENT:
+        if (ev.prompt) send_prompt(app, s, ev.prompt, ev.arg == 1, "просьба", cols, rows);
+        break;
 
     case PAGE_EVENT_ACTION_TOGGLE:
         s->page_action_open = (s->page_action_open == ev.arg + 1) ? 0 : ev.arg + 1;
@@ -2315,6 +2329,10 @@ int main(int argc, char **argv)
             handle_page_event(&app, active, page_event);
         if (overlay_event.kind == PAGE_EVENT_NEW_PROJECT)
             handle_new_project(&app, overlay_event);
+        // Просьба из карточки — обычное событие страницы: она открывается
+        // и поверх терминала, и поверх страницы, а исполняет её вкладка.
+        else if (overlay_event.kind != PAGE_EVENT_NONE && active)
+            handle_page_event(&app, active, overlay_event);
     }
 
     save_layout(&app);

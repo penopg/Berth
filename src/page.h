@@ -74,6 +74,9 @@ typedef enum {
     PAGE_EVENT_ACTIONS_NEW,      // попросить агента завести кнопку
     PAGE_EVENT_ACTION_NEW_FOR,   // …над таблицей arg: контекст выбран местом
     PAGE_EVENT_ACTION_REMOVE,    // убрать действие arg из файла
+    // Просьба агенту своими словами: prompt — контекст места плюс то, что
+    // написал человек; arg — 1, если молча задачей, 0 — в разговор.
+    PAGE_EVENT_ASK_AGENT,
     PAGE_EVENT_TWO_COLUMNS,      // сложить страницу в одну колонку и обратно
     PAGE_EVENT_TABLE_CFG,        // открыть или закрыть настройку колонок
     PAGE_EVENT_TABLE_COL,        // показывать колонку arg2 таблицы arg или нет
@@ -159,6 +162,10 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 void      page_new_project_begin(const char *root, const char *group);
 void      page_new_project_failed(const char *why);   // вернуть редактор с ошибкой
 bool      page_overlay_active(void);
+// Окно просьбы агенту: контекст собирает берт (что за место, какие файлы),
+// слова пишет человек. Рисуется карточкой поверх окна, как новый проект.
+void page_ask_begin(const char *cwd, const char *head, const char *ctx);
+
 PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
                             Rect view, Vector2 mouse);
 

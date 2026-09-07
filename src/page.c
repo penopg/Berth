@@ -598,6 +598,14 @@ static struct {
     char answer[ACTION_ASK_MAX][ACTION_TEXT_MAX];
     char tmpl[ACTION_TEXT_MAX * 2];          // шаблон с уже подставленной записью
 
+    // Просьба агенту своими словами. Контекст (что за место, какие файлы,
+    // какой скилл про это знает) собирает берт: он знает, где нажали, а
+    // человеку набирать это глупо. Поле ввода одно, и в нём — слова.
+    bool asking;
+    bool ask_task;                 // отправить молча задачей, а не в разговор
+    char ask_head[160];            // подпись карточки
+    char ask_ctx[2048];
+
     // Новый проект в группе: cwd — папка группы, group — её имя, notice —
     // отказ прошлой попытки (папка есть, имя плохое).
     bool project;
@@ -741,17 +749,20 @@ static void draw_tip(Ctx *c)
 
 static int edit_fields(void)
 {
+    if (g_edit.asking) return 1;
     return g_edit.action ? g_edit.ask_n : 2;
 }
 
 static char *edit_buf(void)
 {
+    if (g_edit.asking) return g_edit.body;
     if (g_edit.action) return g_edit.answer[g_edit.field];
     return g_edit.field == 0 ? g_edit.title : g_edit.body;
 }
 
 static size_t edit_cap(void)
 {
+    if (g_edit.asking) return sizeof(g_edit.body);
     if (g_edit.action) return sizeof(g_edit.answer[0]);
     return g_edit.field == 0 ? sizeof(g_edit.title) : sizeof(g_edit.body);
 }
@@ -835,6 +846,15 @@ static void edit_begin_action(const char *cwd, int index, int row, const char *t
     snprintf(g_edit.tmpl, sizeof(g_edit.tmpl), "%s", tmpl);
 }
 
+void page_ask_begin(const char *cwd, const char *head, const char *ctx)
+{
+    edit_begin(cwd, -1, NULL);
+    g_edit.asking = true;
+    snprintf(g_edit.ask_head, sizeof(g_edit.ask_head), "%s", head ? head : "Попросить агента");
+    snprintf(g_edit.ask_ctx, sizeof(g_edit.ask_ctx), "%s", ctx ? ctx : "");
+    g_edit.cursor = 0;
+}
+
 void page_new_project_begin(const char *root, const char *group)
 {
     edit_begin(root, -1, NULL);
@@ -860,7 +880,7 @@ void page_new_project_failed(const char *why)
 
 bool page_overlay_active(void)
 {
-    return g_edit.active && g_edit.project;
+    return g_edit.active && (g_edit.project || g_edit.asking);
 }
 
 static bool key_hit(int key)
@@ -893,7 +913,9 @@ static int edit_keys(void)
             size_t n = 0;
             for (const char *p = clip; *p && n + 1 < sizeof(tmp); p++) {
                 if (*p == '\r') continue;
-                tmp[n++] = (*p == '\n' && g_edit.field == 0) ? ' ' : *p;
+                // Поле просьбы многострочное: вставленное сохраняет строки.
+                bool one_line = g_edit.field == 0 && !g_edit.asking;
+                tmp[n++] = (*p == '\n' && one_line) ? ' ' : *p;
             }
             edit_insert(tmp, n);
         }
@@ -931,6 +953,8 @@ static int edit_keys(void)
             } else {
                 return 1;
             }
+        } else if (g_edit.asking) {
+            edit_insert("\n", 1);      // поле одно, и оно многострочное
         } else if (g_edit.field == 0) {
             g_edit.field = 1;
             g_edit.cursor = (int)strlen(g_edit.body);
@@ -1051,7 +1075,10 @@ static void draw_editor(Ctx *c, int indent)
     int top = c->y;
 
     gap(c, 1);
-    if (g_edit.action) {
+    if (g_edit.asking) {
+        edit_field(c, 0, g_edit.body, true,
+                   "Что сделать — обычными словами; ⌘↩ отправить", x, width);
+    } else if (g_edit.action) {
         for (int i = 0; i < g_edit.ask_n; i++)
             edit_field(c, i, g_edit.answer[i], false, g_edit.ask[i], x, width);
     } else if (g_edit.project) {
@@ -1070,7 +1097,11 @@ static void draw_editor(Ctx *c, int indent)
 
     row_begin(c);
     c->row_x = x;
-    if (button(c, g_edit.action ? "Отправить  ⌘↩" : "Сохранить  ⌘↩", true)) action = 1;
+    if (button(c, g_edit.action || g_edit.asking ? "Отправить  ⌘↩" : "Сохранить  ⌘↩", true))
+        action = 1;
+    // Дорога у просьбы та же, что у действия: разговор — когда ответ надо
+    // прочитать, задача — когда правка идёт в файл и читать нечего.
+    if (g_edit.asking && button(c, "Молча задачей", false)) { g_edit.ask_task = true; action = 1; }
     if (button(c, "Отмена  esc", false)) action = -1;
     row_end(c);
 
@@ -1080,6 +1111,21 @@ static void draw_editor(Ctx *c, int indent)
         g_edit.last_height = c->y - top;
         reveal(c, top, c->y);
     }
+
+    if (action == 1 && g_edit.asking) {
+        rtrim_inplace(g_edit.body);
+        if (!g_edit.body[0]) return;      // просьба без слов — не просьба
+        static char prompt[sizeof(g_edit.ask_ctx) + sizeof(g_edit.body) + 8];
+        if (g_edit.ask_ctx[0])
+            snprintf(prompt, sizeof(prompt), "%s\n\n%s", g_edit.ask_ctx, g_edit.body);
+        else
+            snprintf(prompt, sizeof(prompt), "%s", g_edit.body);
+        set_event(c, PAGE_EVENT_ASK_AGENT, g_edit.ask_task ? 1 : 0, NULL);
+        c->event.prompt = prompt;
+        g_edit.active = false;
+        return;
+    }
+    if (action == -1 && g_edit.asking) { g_edit.active = false; return; }
 
     if (action == 1 && g_edit.action) {
         // Подставляем ответы формы в шаблон — и реплика готова.
@@ -1285,7 +1331,7 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
     // странице или редактор подпроекта) здесь не показываем, но и не
     // закрываем: он нарисуется в своём разделе.
     bool editing = g_edit.active && !g_edit.subproject && !g_edit.skill && !g_edit.project
-                && !g_edit.action && !strcmp(g_edit.cwd, cwd);
+                && !g_edit.action && !g_edit.asking && !strcmp(g_edit.cwd, cwd);
 
     bool down     = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     bool released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
@@ -1592,9 +1638,25 @@ static const char *parent_of(const ProjectList *projects, const char *cwd)
 // Раздел «Действия» — оснастка проекта, рядом со скиллами: кнопки над
 // данными живут одним файлом на проект, а к таблицам только прикрепляются.
 // Здесь их смотрят и правят; работают они там, где прикреплены.
-static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
-                                 int tables)
+// Таблицы проекта — из реестра документов: агенту нужны все, а не только
+// показанные на странице. Пусто — берём показанные.
+static void tables_of(const ProjectState *st, char *out, size_t cap)
 {
+    out[0] = '\0';
+    for (int i = 0; i < st->files.count; i++) {
+        if (!files_is_table(st->files.items[i].path)) continue;
+        snprintf(out + strlen(out), cap - strlen(out), "%s%s",
+                 out[0] ? ", " : "", st->files.items[i].path);
+    }
+    for (int i = 0; !out[0] && i < st->table_count; i++)
+        snprintf(out + strlen(out), cap - strlen(out), "%s%s",
+                 out[0] ? ", " : "", st->tables[i].path);
+}
+
+static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *st)
+{
+    const ActionList *al = &st->actions;
+    int tables = st->table_count;
     if (al->count == 0 && tables == 0) return;
 
     const int cw = c->font->cell_width;
@@ -1614,13 +1676,36 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
 
     char head[64];
     snprintf(head, sizeof(head), al->count ? "Действия · %d" : "Действия", al->count);
-    if (section_help(c, head, al->exists ? "Править файл" : NULL,
+    // Два действия у заголовка: файл открыть руками и попросить агента.
+    // Просьба — общий путь правки оснастки: формат кнопок знает он, а
+    // контекст (какие кнопки есть, какие таблицы в проекте) берт
+    // подставляет сам — человеку набирать это незачем.
+    const char *acts[2] = { al->exists ? "Править файл" : NULL, "Попросить" };
+    int hit = section_head(c, head, acts, 2,
                      "Кнопки над данными: клик собирает реплику из шаблона и "
                      "отправляет её агенту — задачей, если правка идёт в файл, "
                      "или в разговор, если ответ надо прочитать. Стоят у записи "
                      "таблицы и у таблицы целиком. Живут в .berth/actions.tsv, "
-                     "заводит их агент по скиллу berth-actions."))
-        set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
+                     "заводит и правит их агент по скиллу berth-actions.");
+    if (hit == 1) set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
+    if (hit == 2) {
+        char tl[400], ctx[1600];
+        tables_of(st, tl, sizeof(tl));
+        // Дописываем по строке, каждый раз считая место от strlen: snprintf
+        // возвращает длину, которая **была бы** написана, и складывать эти
+        // числа нельзя — на переполнении остаток ушёл бы в минус.
+        snprintf(ctx, sizeof(ctx), "Кнопки проекта, .berth/actions.tsv:\n");
+        for (int i = 0; i < al->count; i++)
+            snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx), "  «%s» — %s:%s · %s\n",
+                     al->items[i].name,
+                     al->items[i].scope == ACTION_ROW ? "запись" : "таблица",
+                     al->items[i].target, al->items[i].to_task ? "задача" : "разговор");
+        if (!al->count) snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx), "  пока нет\n");
+        snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx),
+                 "Таблицы проекта: %s\nФормат файла и правила — в скилле berth-actions.",
+                 tl[0] ? tl : "нет");
+        page_ask_begin(s->cwd, "Попросить агента · Действия", ctx);
+    }
 
     // Мини-таблица с шапкой. Плашка-имя врала: выглядела кнопкой, а нажать
     // её было нельзя. Список записей с полями и должен выглядеть списком
@@ -1689,6 +1774,23 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
         c->y += SP_ROW;
         row_begin(c);
         c->row_x = c->x + cw * 2;
+        // «Попросить» рядом с «Удалить»: поправить текст, повторить кнопку
+        // у другой таблицы, переименовать — всё это слова, и пишет их
+        // агент. Берт сам делает лишь то, что слов не требует.
+        if (button_kind(c, "Попросить", BTN_QUIET)) {
+            char tl[400], ctx[1600];
+            tables_of(st, tl, sizeof(tl));
+            snprintf(ctx, sizeof(ctx),
+                     "Кнопка «%s» в .berth/actions.tsv:\n  %s:%s · %s\n  %s\n"
+                     "Таблицы проекта: %s\n"
+                     "Формат файла и правила — в скилле berth-actions.",
+                     a->name, a->scope == ACTION_ROW ? "запись" : "таблица",
+                     a->target, a->to_task ? "задача" : "разговор", a->text,
+                     tl[0] ? tl : "нет");
+            char title[ACTION_NAME_MAX + 40];
+            snprintf(title, sizeof(title), "Попросить агента · «%s»", a->name);
+            page_ask_begin(s->cwd, title, ctx);
+        }
         if (button_kind(c, "Удалить", BTN_DANGER))
             set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
         row_end(c);
@@ -2846,7 +2948,7 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 
     // Действия и скиллы — оснастка проекта, последними: к ним ходят реже,
     // чем к задачам.
-    draw_actions_section(&c, s, &st->actions, st->table_count);
+    draw_actions_section(&c, s, st);
     draw_skills(&c, s, projects);
 
     if (wide) {
@@ -2957,13 +3059,35 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
     DrawRectangle(card.x, card.y, card.w, card.h, theme->term_bg);
     DrawRectangleLines(card.x, card.y, card.w, card.h, theme->group_label);
 
-    char head[PROJECT_NAME_MAX + 32];
-    snprintf(head, sizeof(head), "Новый проект · %s", g_edit.group);
-    text(&c, head, theme->row_text);
-    char where[SESSION_PATH_MAX + 16];
-    snprintf(where, sizeof(where), "Папка появится в %s", g_edit.cwd);
-    text(&c, where, theme->row_text_dim);
-    if (g_edit.notice[0]) text(&c, g_edit.notice, theme->badge_dead);
+    if (g_edit.asking) {
+        // Контекст показан целиком: человек должен видеть, что уйдёт вместе
+        // с его словами. Приглушённо — это не то, что он пишет.
+        text(&c, g_edit.ask_head, theme->row_text);
+        // Контекст рисуем построчно: body_text склеивает одиночные переводы
+        // строки в абзац (так задумано для описаний задач), а здесь каждая
+        // строка — своя запись, и слипаться им нельзя.
+        gap(&c, 1);
+        const char *p = g_edit.ask_ctx;
+        while (*p) {
+            const char *nl = strchr(p, '\n');
+            size_t n = nl ? (size_t)(nl - p) : strlen(p);
+            char line[512];
+            snprintf(line, sizeof(line), "%.*s", (int)(n < sizeof(line) - 1 ? n : sizeof(line) - 1), p);
+            if (line[0]) draw_wrapped(&c, line, c.x, content_width(&c), theme->row_text_dim, true);
+            else         gap(&c, 1);
+            if (!nl) break;
+            p = nl + 1;
+        }
+        gap(&c, 1);
+    } else {
+        char head[PROJECT_NAME_MAX + 32];
+        snprintf(head, sizeof(head), "Новый проект · %s", g_edit.group);
+        text(&c, head, theme->row_text);
+        char where[SESSION_PATH_MAX + 16];
+        snprintf(where, sizeof(where), "Папка появится в %s", g_edit.cwd);
+        text(&c, where, theme->row_text_dim);
+        if (g_edit.notice[0]) text(&c, g_edit.notice, theme->badge_dead);
+    }
 
     draw_editor(&c, 0);
 
