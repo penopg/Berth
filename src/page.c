@@ -1892,6 +1892,28 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
                 if (button(c, "Открыть", true)) set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
                 if (button(c, "Папка", false))  set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
                 row_end(c);
+
+                // Таблицу можно показывать прямо на странице — тогда её не
+                // надо открывать, чтобы вспомнить, что в ней. Мест немного:
+                // страница не витрина файлов, а рабочее место.
+                if (files_is_table(e->path)) {
+                    bool on = files_shown(fl, e->path);
+                    bool room = on || fl->shown_count < FILES_SHOWN_MAX;
+                    row_begin(c);
+                    c->row_x = c->x + cw * 2;
+                    const char *label = "Показывать на странице";
+                    int lw = chars_of(label) * cw;
+                    ui_text_clipped(c->font, label, c->row_x, c->y + 6,
+                                    th->row_text_dim, lw);
+                    c->row_x += lw + cw;
+                    if (room) {
+                        if (toggle(c, on)) set_event(c, PAGE_EVENT_FILE_SHOW, i, NULL);
+                    } else {
+                        ui_text_clipped(c->font, "уже показаны две", c->row_x, c->y + 6,
+                                        th->row_text_dim, cw * 20);
+                    }
+                    row_end(c);
+                }
             } else {
                 text(c, "файла на месте нет — строку реестра пора убрать", th->row_text_dim);
             }
