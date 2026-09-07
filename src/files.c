@@ -37,9 +37,49 @@ static void shown_path(const char *cwd, char *out, size_t cap)
     snprintf(out, cap, "%s/%s", cwd, FILES_SHOWN_FILE);
 }
 
+// Запомнить вид колонок у таблицы, которой сейчас нет на странице.
+static void cols_remember(FileList *fl, const char *rel, const char *spec)
+{
+    if (!spec || !*spec) return;
+    for (int i = 0; i < fl->cols_count; i++)
+        if (!strcmp(fl->cols_path[i], rel)) {
+            snprintf(fl->cols_spec[i], FILE_NOTE_MAX, "%s", spec);
+            return;
+        }
+    if (fl->cols_count >= FILES_COLS_MAX) {
+        // Место кончилось — забываем самое давнее.
+        for (int i = 0; i + 1 < FILES_COLS_MAX; i++) {
+            memcpy(fl->cols_path[i], fl->cols_path[i + 1], FILE_PATH_MAX);
+            memcpy(fl->cols_spec[i], fl->cols_spec[i + 1], FILE_NOTE_MAX);
+        }
+        fl->cols_count--;
+    }
+    snprintf(fl->cols_path[fl->cols_count], FILE_PATH_MAX, "%s", rel);
+    snprintf(fl->cols_spec[fl->cols_count], FILE_NOTE_MAX, "%s", spec);
+    fl->cols_count++;
+}
+
+// Забрать запомненный вид (и убрать из памяти: теперь он живёт при строке
+// показа).
+static void cols_take(FileList *fl, const char *rel, char *out, size_t cap)
+{
+    out[0] = '\0';
+    for (int i = 0; i < fl->cols_count; i++) {
+        if (strcmp(fl->cols_path[i], rel)) continue;
+        snprintf(out, cap, "%s", fl->cols_spec[i]);
+        for (int j = i; j + 1 < fl->cols_count; j++) {
+            memcpy(fl->cols_path[j], fl->cols_path[j + 1], FILE_PATH_MAX);
+            memcpy(fl->cols_spec[j], fl->cols_spec[j + 1], FILE_NOTE_MAX);
+        }
+        fl->cols_count--;
+        return;
+    }
+}
+
 static void shown_load(FileList *fl, const char *cwd)
 {
     fl->shown_count = 0;
+    fl->cols_count = 0;
     char path[700];
     shown_path(cwd, path, sizeof(path));
     fl->shown_mtime = file_mtime(path);
@@ -51,18 +91,27 @@ static void shown_load(FileList *fl, const char *cwd)
         char *tab = strchr(line, '\t');
         if (!tab) continue;
         *tab = '\0';
-        if (strcmp(line, "show")) continue;
-        if (fl->shown_count >= FILES_SHOWN_MAX) break;
+        bool show = !strcmp(line, "show");
+        if (!show && strcmp(line, "cols")) continue;
         char *p = tab + 1;
         // Третье поле — выбранные колонки; его может не быть.
         char *cols = strchr(p, '\t');
         if (cols) *cols++ = '\0';
         if (!strncmp(p, "./", 2)) p += 2;
-        snprintf(fl->shown[fl->shown_count], FILE_PATH_MAX, "%s", p);
-        rtrim(fl->shown[fl->shown_count]);
-        snprintf(fl->shown_cols[fl->shown_count], FILE_NOTE_MAX, "%s", cols ? cols : "");
-        rtrim(fl->shown_cols[fl->shown_count]);
-        if (fl->shown[fl->shown_count][0]) fl->shown_count++;
+        char path_buf[FILE_PATH_MAX], spec_buf[FILE_NOTE_MAX];
+        snprintf(path_buf, sizeof(path_buf), "%s", p);
+        rtrim(path_buf);
+        snprintf(spec_buf, sizeof(spec_buf), "%s", cols ? cols : "");
+        rtrim(spec_buf);
+        if (!path_buf[0]) continue;
+        if (show) {
+            if (fl->shown_count >= FILES_SHOWN_MAX) continue;
+            memcpy(fl->shown[fl->shown_count], path_buf, FILE_PATH_MAX);
+            memcpy(fl->shown_cols[fl->shown_count], spec_buf, FILE_NOTE_MAX);
+            fl->shown_count++;
+        } else {
+            cols_remember(fl, path_buf, spec_buf);
+        }
     }
     fclose(f);
 }
@@ -83,6 +132,9 @@ static bool shown_write(FileList *fl, const char *cwd)
         if (fl->shown_cols[i][0]) fprintf(f, "\t%s", fl->shown_cols[i]);
         fputc('\n', f);
     }
+    // Снятые со страницы таблицы помнят свой вид: строка cols без показа.
+    for (int i = 0; i < fl->cols_count; i++)
+        fprintf(f, "cols\t%s\t%s\n", fl->cols_path[i], fl->cols_spec[i]);
     fclose(f);
     if (rename(tmp, path) != 0) { remove(tmp); return false; }
     fl->shown_mtime = file_mtime(path);
@@ -110,6 +162,9 @@ bool files_show_toggle(FileList *fl, const char *cwd, const char *rel)
     for (int i = 0; i < fl->shown_count; i++)
         if (!strcmp(fl->shown[i], rel)) at = i;
     if (at >= 0) {
+        // Убрали со страницы — вид не выбрасываем: тумблер туда-обратно не
+        // должен стирать настройку, её делали руками.
+        cols_remember(fl, fl->shown[at], fl->shown_cols[at]);
         for (int i = at; i + 1 < fl->shown_count; i++) {
             memcpy(fl->shown[i], fl->shown[i + 1], FILE_PATH_MAX);
             memcpy(fl->shown_cols[i], fl->shown_cols[i + 1], FILE_NOTE_MAX);
@@ -118,7 +173,7 @@ bool files_show_toggle(FileList *fl, const char *cwd, const char *rel)
     } else {
         if (fl->shown_count >= FILES_SHOWN_MAX) return false;
         snprintf(fl->shown[fl->shown_count], FILE_PATH_MAX, "%s", rel);
-        fl->shown_cols[fl->shown_count][0] = '\0';
+        cols_take(fl, rel, fl->shown_cols[fl->shown_count], FILE_NOTE_MAX);
         fl->shown_count++;
     }
     return shown_write(fl, cwd);

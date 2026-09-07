@@ -21,6 +21,7 @@
 #define FILES_FILE     ".berth/files.tsv"
 #define FILES_UNDESC_MAX 64   // сколько неописанных показываем по именам
 #define FILES_SHOWN_MAX  2    // сколько таблиц разом показываем на странице
+#define FILES_COLS_MAX   8    // у скольких снятых таблиц помним вид колонок
 #define FILES_SHOWN_FILE ".berth/shown.tsv"
 
 typedef struct {
@@ -58,6 +59,13 @@ typedef struct {
     // полем строки. Пусто — все.
     char   shown_cols[FILES_SHOWN_MAX][FILE_NOTE_MAX];
     int    shown_count;
+
+    // Вид колонок у таблиц, снятых со страницы: тумблер выключили и снова
+    // включили — настройка должна вернуться, а не начаться с чистого листа.
+    // Строки `cols\t<путь>\t<вид>` в том же файле.
+    char   cols_path[FILES_COLS_MAX][FILE_PATH_MAX];
+    char   cols_spec[FILES_COLS_MAX][FILE_NOTE_MAX];
+    int    cols_count;
     time_t shown_mtime;
 } FileList;
 

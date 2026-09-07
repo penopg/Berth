@@ -1746,7 +1746,8 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
     int avail = content_width(c) / cw;
     int col[TABLE_COLS_MAX], w[TABLE_COLS_MAX];
     int cols = 0, used = 0, chosen = 0;
-    for (int i = 0; i < t->col_count; i++) {
+    for (int k = 0; k < t->col_count; k++) {
+        int i = t->col_order[k];   // порядок показа, а не порядок файла
         if (!t->col_show[i]) continue;
         chosen++;
         int cwid = t->col_chars[i];
