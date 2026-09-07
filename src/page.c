@@ -1771,14 +1771,23 @@ static bool action_form_here(const Session *s, int row)
         && !strcmp(g_edit.cwd, s->cwd);
 }
 
-static void draw_actions(Ctx *c, const Session *s, const ActionList *al,
-                         const Table *t, int row, ActionScope scope)
+static int actions_count(const ActionList *al, const Table *t, ActionScope scope)
 {
-    int shown = 0;
+    int n = 0;
+    for (int i = 0; i < al->count; i++)
+        if (al->items[i].scope == scope && !strcmp(al->items[i].target, t->path)) n++;
+    return n;
+}
+
+// Кнопки действий в **уже открытый** ряд: рядом с ними стоят свои кнопки
+// раздела, и собственный ряд разводил бы их ступеньками по вертикали.
+// Ряд и форму открывает вызывающий — он знает, где им место.
+static void actions_buttons(Ctx *c, const Session *s, const ActionList *al,
+                            const Table *t, int row, ActionScope scope)
+{
     for (int i = 0; i < al->count; i++) {
         const Action *a = &al->items[i];
         if (a->scope != scope || strcmp(a->target, t->path)) continue;
-        if (!shown++) { row_begin(c); c->row_x = c->x + c->font->cell_width * 2; }
         if (!button(c, a->name, !a->to_task)) continue;
 
         const char *names[TABLE_COLS_MAX], *vals[TABLE_COLS_MAX];
@@ -1800,14 +1809,6 @@ static void draw_actions(Ctx *c, const Session *s, const ActionList *al,
             c->event.prompt = tmpl;
         }
     }
-    if (shown) row_end(c);
-    // Механизм невидим, пока у таблицы нет ни одной кнопки: строчка-подсказка
-    // и есть способ о нём узнать. Показываем только у записи и только когда
-    // кнопок нет вовсе — иначе она превратится в шум.
-    if (!shown && scope == ACTION_ROW && al->count == 0)
-        text(c, "действий нет — попроси агента завести кнопку над этой таблицей",
-             c->theme->row_text_dim);
-    if (action_form_here(s, row)) draw_editor(c, c->font->cell_width * 2);
 }
 
 static const Table *g_sort_table;
@@ -2076,34 +2077,48 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
                                 th->row_text, content_width(c) - cw * 2 - lw);
                 c->y += c->line;
             }
-            draw_actions(c, s, al, t, r, ACTION_ROW);
+            if (actions_count(al, t, ACTION_ROW) > 0) {
+                row_begin(c);
+                c->row_x = c->x + cw * 2;
+                actions_buttons(c, s, al, t, r, ACTION_ROW);
+                row_end(c);
+            } else if (al->count == 0) {
+                // Механизм невидим, пока у проекта нет ни одной кнопки:
+                // строчка-подсказка и есть способ о нём узнать.
+                text(c, "действий нет — попроси агента завести кнопку над этой таблицей",
+                     th->row_text_dim);
+            }
+            if (action_form_here(s, r)) draw_editor(c, cw * 2);
             reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
             gap(c, 1);
         }
     }
 
-    if (t->row_count > limit || t->file_rows > t->row_count) {
+    // Один ряд под таблицей: сначала показ записей, потом действия над ней.
+    // Раздельными рядами они вставали ступенькой и читались кучей.
+    bool more = t->row_count > limit;
+    bool fold = !more && all && t->row_count > 8;
+    if (more || fold || actions_count(al, t, ACTION_TABLE) > 0) {
         gap(c, 1);
-        char more[96];
-        if (t->row_count > limit)
-            snprintf(more, sizeof(more), "Показать все · %d", t->row_count);
-        else
-            snprintf(more, sizeof(more), "В файле ещё %d — на странице первые %d",
-                     t->file_rows - t->row_count, t->row_count);
-        if (t->row_count > limit) {
-            row_begin(c);
-            if (button(c, more, false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
-            row_end(c);
-        } else {
-            text(c, more, th->row_text_dim);
-        }
-    } else if (all && t->row_count > 8) {
         row_begin(c);
-        if (button(c, "Свернуть", false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+        if (more) {
+            char label[64];
+            snprintf(label, sizeof(label), "Показать все · %d", t->row_count);
+            if (button(c, label, false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+        } else if (fold) {
+            if (button(c, "Свернуть", false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+        }
+        actions_buttons(c, s, al, t, -1, ACTION_TABLE);
         row_end(c);
     }
+    if (action_form_here(s, -1)) draw_editor(c, 0);
 
-    draw_actions(c, s, al, t, -1, ACTION_TABLE);
+    if (t->file_rows > t->row_count) {
+        char note[96];
+        snprintf(note, sizeof(note), "В файле ещё %d — на странице первые %d",
+                 t->file_rows - t->row_count, t->row_count);
+        text(c, note, th->row_text_dim);
+    }
 
     // Что не влезло в ширину, из списка выпало молча — об этом надо сказать,
     // иначе колонка выглядит потерянной. Скрытая настройкой — выбор
