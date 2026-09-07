@@ -1516,60 +1516,58 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
     if (section_action(c, head, al->exists ? "Править файл" : NULL))
         set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
 
+    // Мини-таблица с шапкой. Плашка-имя врала: выглядела кнопкой, а нажать
+    // её было нельзя. Список записей с полями и должен выглядеть списком
+    // записей — тем же способом, каким на этой же странице показана таблица
+    // данных.
+    int name_w = 6;
+    for (int i = 0; i < al->count; i++) {
+        int n = chars_of(al->items[i].name);
+        if (n > name_w) name_w = n;
+    }
+    if (name_w > 24) name_w = 24;
+    int where_w = tables > 1 ? 22 : 10;
+    int col2 = c->x + (name_w + 2) * cw;
+    int col3 = col2 + (where_w + 2) * cw;
+
+    ui_text_clipped(c->font, "кнопка", c->x, c->y, th->row_text_dim, name_w * cw);
+    ui_text_clipped(c->font, "где", col2, c->y, th->row_text_dim, where_w * cw);
+    ui_text_clipped(c->font, "куда", col3, c->y, th->row_text_dim, cw * 10);
+    c->y += c->line + 2;
+
     for (int i = 0; i < al->count; i++) {
         const Action *a = &al->items[i];
         bool open = s->page_action_open == i + 1;
-
-        // Имя рисуем той плашкой, какой оно станет на странице таблицы.
-        // Строка «Посмотрел» ни о чём не говорит — через неделю это слово
-        // не отличить от статуса; кнопка «Посмотрел» говорит сама за себя.
-        int chip_w = chars_of(a->name) * cw + 20;
-        int chip_h = c->line + 6;
-        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16,
-                   chip_h + (open ? 6 : c->line + 6) };
+        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
 
-        DrawRectangleLines(c->x, c->y, chip_w, chip_h,
-                           hover ? th->row_text_dim : th->sidebar_border);
-        ui_text_clipped(c->font, a->name, c->x + 10, c->y + 3, th->row_text, chip_w - 16);
-
-        // Справа — где кнопка стоит и куда уходит. Дорога цветом: разговор
-        // акцентом (он заговорит с тобой), задача приглушённо (сделает молча).
-        // Имя таблицы показываем, только когда их больше одной: у одной оно в
-        // каждой строке — шум.
-        const char *where = a->scope == ACTION_ROW ? "у записи" : "у таблицы";
-        const char *road = a->to_task ? "задача" : "разговор";
-        char meta[96];
+        char where[64];
         if (tables > 1) {
             const char *base = strrchr(a->target, '/');
-            snprintf(meta, sizeof(meta), "%s %s · ", where, base ? base + 1 : a->target);
+            snprintf(where, sizeof(where), "%s %s",
+                     a->scope == ACTION_ROW ? "у записи" : "у таблицы",
+                     base ? base + 1 : a->target);
         } else {
-            snprintf(meta, sizeof(meta), "%s · ", where);
+            snprintf(where, sizeof(where), "%s",
+                     a->scope == ACTION_ROW ? "у записи" : "у таблицы");
         }
-        int rw = (chars_of(meta) + chars_of(road)) * cw;
-        int right = c->x + content_width(c);
-        int mw = ui_text_clipped(c->font, meta, right - rw, c->y + 3, th->row_text_dim, rw);
-        ui_text_clipped(c->font, road, right - rw + mw, c->y + 3,
-                        a->to_task ? th->row_text_dim : th->progress_fill, rw - mw);
-        c->y += chip_h + SP_ROW;
+        ui_text_clipped(c->font, a->name, c->x, c->y, th->row_text, name_w * cw);
+        ui_text_clipped(c->font, where, col2, c->y, th->row_text_dim, where_w * cw);
+        // Дорога цветом: разговор акцентом — он заговорит с тобой; задача
+        // приглушённо — сделает молча.
+        ui_text_clipped(c->font, a->to_task ? "задача" : "разговор", col3, c->y,
+                        a->to_task ? th->row_text_dim : th->progress_fill, cw * 10);
+        c->y += c->line + SP_ROW;
 
         if (hover && c->click) set_event(c, PAGE_EVENT_ACTION_TOGGLE, i, NULL);
-
-        if (!open) {
-            ui_text_clipped(c->font, a->text, c->x + cw * 2, c->y,
-                            th->row_text_dim, content_width(c) - cw * 2);
-            c->y += c->line + SP_ROW;
-            continue;
-        }
+        if (!open) continue;
 
         // Раскрытое — свой блок с линейкой слева: без неё «Удалить» вставало
-        // вплотную к следующему действию и читалось его кнопкой.
+        // вплотную к следующей строке и читалось её кнопкой.
         int block_top = c->y;
-        char what[160];
-        snprintf(what, sizeof(what), "Кнопка %s таблицы %s. Клик отправляет %s:",
-                 a->scope == ACTION_ROW ? "у каждой записи" : "у",
-                 strrchr(a->target, '/') ? strrchr(a->target, '/') + 1 : a->target,
+        char what[128];
+        snprintf(what, sizeof(what), "клик отправляет %s:",
                  a->to_task ? "задачей, молча" : "репликой в разговор");
         ui_text_clipped(c->font, what, c->x + cw * 2, c->y, th->row_text_dim,
                         content_width(c) - cw * 2);
