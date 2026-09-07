@@ -69,6 +69,10 @@ typedef enum {
     PAGE_EVENT_TABLE_CFG,        // открыть или закрыть настройку колонок
     PAGE_EVENT_TABLE_COL,        // показывать колонку arg2 таблицы arg или нет
     PAGE_EVENT_TABLE_COLS_ALL,   // показать все колонки таблицы arg
+    // Переставить колонку: arg2 = откуда * TABLE_COLS_MAX + куда, оба —
+    // места в порядке показа. Двух чисел в событии нет, а заводить третье
+    // ради одной перестановки не стоит.
+    PAGE_EVENT_TABLE_COL_MOVE,
     PAGE_EVENT_FILE_OPEN,        // открыть файл штатно
     PAGE_EVENT_FILE_REVEAL,      // показать файл в Finder
     PAGE_EVENT_DESCRIBE_FILES,   // описать все неописанные документы скиллом berth-files

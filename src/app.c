@@ -1096,6 +1096,24 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         break;
     }
 
+    case PAGE_EVENT_TABLE_COL_MOVE: {
+        ProjectState *st = projstate_edit(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->table_count) break;
+        Table *t = &st->tables[ev.arg];
+        int from = ev.arg2 / TABLE_COLS_MAX, to = ev.arg2 % TABLE_COLS_MAX;
+        if (from < 0 || from >= t->col_count || to < 0 || to >= t->col_count) break;
+        int col = t->col_order[from];
+        if (from < to)
+            for (int i = from; i < to; i++) t->col_order[i] = t->col_order[i + 1];
+        else
+            for (int i = from; i > to; i--) t->col_order[i] = t->col_order[i - 1];
+        t->col_order[to] = col;
+        char spec[FILE_NOTE_MAX];
+        table_cols_spec(t, spec, sizeof(spec));
+        files_show_cols_set(&st->files, s->cwd, t->path, spec);
+        break;
+    }
+
     case PAGE_EVENT_TABLE_OPEN: {
         const ProjectState *st = projstate_peek(s->cwd);
         if (!st || ev.arg < 0 || ev.arg >= st->table_count) break;

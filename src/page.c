@@ -1,3 +1,4 @@
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1632,6 +1633,63 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
 // руками или агентом, — а страница только показывает: редактор таблицы это
 // другой продукт, и заводить его ради взгляда на двенадцать строк незачем.
 
+// Чип колонки: подпись в рамке, включённая — акцентом. Возвращает свой
+// прямоугольник: попадание мыши проверяет вызывающий, потому что чип и
+// нажимают, и тянут, а это разные события.
+static Rect chip(Ctx *c, const char *label, bool on, bool lifted)
+{
+    int chars = chars_of(label);
+    Rect r = { c->row_x, c->y, chars * c->font->cell_width + 20,
+               c->font->cell_height + 10 };
+    int home = c->row_home ? c->row_home : c->x;
+    if (r.x + r.w > c->x + content_width(c) && c->row_x > home) {
+        c->y += r.h + 6;
+        c->row_x = home;
+        r.x = home;
+        r.y = c->y;
+    }
+    c->row_used = true;
+
+    if (lifted) {
+        // Место, откуда взяли: пустая рамка. Ряд не должен схлопываться —
+        // иначе чипы поедут под курсором, и целиться станет некуда.
+        DrawRectangleLines(r.x, r.y, r.w, r.h, c->theme->sidebar_border);
+    } else {
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        DrawRectangle(r.x, r.y, r.w, r.h,
+                      hover ? c->theme->row_hover_bg : c->theme->row_active_bg);
+        if (on) DrawRectangle(r.x, r.y, 3, r.h, c->theme->progress_fill);
+        ui_text_clipped(c->font, label, r.x + 10, r.y + 5,
+                        on ? c->theme->row_text : c->theme->row_text_dim, r.w - 16);
+    }
+    c->row_x = r.x + r.w + 8;
+    return r;
+}
+
+// Тянутый чип едет за курсором отдельной плашкой — как задача, только
+// маленькой и без наклона: у чипа в два слова наклон читался бы дрожанием.
+static void draw_chip_ghost(Ctx *c, const char *label, bool on, Rect r)
+{
+    for (int i = 3; i >= 1; i--)
+        DrawRectangle(r.x - i * 2, r.y + 3 - i, r.w + i * 4, r.h + i * 4,
+                      (Color){ 0, 0, 0, (unsigned char)(10 * (4 - i)) });
+    DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_active_bg);
+    if (on) DrawRectangle(r.x, r.y, 3, r.h, c->theme->progress_fill);
+    ui_text_clipped(c->font, label, r.x + 10, r.y + 5,
+                    on ? c->theme->row_text : c->theme->row_text_dim, r.w - 16);
+}
+
+// Перетаскивание чипа: как у задач, живёт между кадрами и одно на окно.
+static struct {
+    bool  active;
+    int   table;        // у какой таблицы тянут
+    char  cwd[SESSION_PATH_MAX];
+    int   from;         // место в порядке показа, откуда взяли
+    bool  moving;       // порог пройден
+    Vector2 press;      // где нажали
+    float grab_dx, grab_dy;
+} g_chip;
+
 static const Table *g_sort_table;
 static int  g_sort_col;
 static bool g_sort_desc;
@@ -1705,20 +1763,104 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
     // Скрытая колонка не пропадает совсем — раскрытая запись показывает
     // все: настройка про то, что видно списком, а не про то, что есть.
     if ((s->page_table_cfg >> idx) & 1u) {
-        text(c, "Какие колонки показывать списком", th->row_text_dim);
+        text(c, "Клик включает колонку, перетаскивание меняет порядок",
+             th->row_text_dim);
+
+        bool down     = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+        bool released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+        // Кнопку отпустили мимо нас — тянуть больше нечего.
+        if (g_chip.active && !down && !released) g_chip.active = false;
+        bool ours = g_chip.active && g_chip.table == idx && !strcmp(g_chip.cwd, s->cwd);
+        if (ours && down && !g_chip.moving
+            && (fabsf(c->mouse.x - g_chip.press.x) > DRAG_THRESHOLD
+                || fabsf(c->mouse.y - g_chip.press.y) > DRAG_THRESHOLD))
+            g_chip.moving = true;
+
+        Rect rect[TABLE_COLS_MAX];
+        Rect ghost = { 0, 0, 0, 0 };
+        int ghost_col = 0;
         row_begin(c);
-        for (int i = 0; i < t->col_count; i++)
-            if (button(c, t->cols[i], t->col_show[i])) {
-                set_event(c, PAGE_EVENT_TABLE_COL, idx, NULL);
-                c->event.arg2 = i;
+        for (int k = 0; k < t->col_count; k++) {
+            int i = t->col_order[k];
+            bool lifted = ours && g_chip.moving && g_chip.from == k;
+            rect[k] = chip(c, t->cols[i], t->col_show[i], lifted);
+            if (lifted) {
+                ghost = rect[k];
+                ghost.x = (int)(c->mouse.x - g_chip.grab_dx);
+                ghost.y = (int)(c->mouse.y - g_chip.grab_dy);
+                ghost_col = i;
             }
+            if (!g_chip.active && c->click && inside(rect[k], c->mouse)
+                && visible_hit(c, c->mouse)) {
+                g_chip.active = true;
+                g_chip.table = idx;
+                snprintf(g_chip.cwd, sizeof(g_chip.cwd), "%s", s->cwd);
+                g_chip.from = k;
+                g_chip.moving = false;
+                g_chip.press = c->mouse;
+                g_chip.grab_dx = c->mouse.x - (float)rect[k].x;
+                g_chip.grab_dy = c->mouse.y - (float)rect[k].y;
+            }
+        }
         row_end(c);
+
+        // Куда встанет, если отпустить сейчас. Считаем по чипам **на своих
+        // местах**: ряд во время перетаскивания не перестраивается, поэтому
+        // и целиться есть куда, и ловушки «спросили по уже переставленному»
+        // здесь нет. Место показывает каретка между чипами.
+        int to = g_chip.from;
+        if (ours && g_chip.moving) {
+            to = t->col_count - 1;
+            for (int k = 0; k < t->col_count; k++) {
+                if (k == g_chip.from) continue;
+                Rect r = rect[k];
+                bool after = c->mouse.y >= r.y + r.h
+                          || (c->mouse.y >= r.y && c->mouse.x >= r.x + r.w / 2);
+                if (!after) {
+                    to = k > g_chip.from ? k - 1 : k;
+                    break;
+                }
+            }
+            // Каретка стоит перед тем чипом, на чьё место встанет тянутый;
+            // в конце ряда — за последним.
+            int at, tail = 0;
+            if (to >= t->col_count - 1) {
+                at = g_chip.from == t->col_count - 1 ? t->col_count - 2 : t->col_count - 1;
+                tail = 1;
+            } else {
+                at = to < g_chip.from ? to : to + 1;
+            }
+            if (at >= 0) {
+                Rect r = rect[at];
+                DrawRectangle(tail ? r.x + r.w + 2 : r.x - 4, r.y, 2, r.h,
+                              th->progress_fill);
+            }
+        }
+
         row_begin(c);
         if (button(c, "Показать все", false))
             set_event(c, PAGE_EVENT_TABLE_COLS_ALL, idx, NULL);
         if (button(c, "Готово", false))
             set_event(c, PAGE_EVENT_TABLE_CFG, idx, NULL);
         row_end(c);
+
+        // Событие — на отпускании: тянули — переставляем, не тянули — это
+        // был клик по чипу.
+        if (ours && released) {
+            if (g_chip.moving) {
+                if (to != g_chip.from) {
+                    set_event(c, PAGE_EVENT_TABLE_COL_MOVE, idx, NULL);
+                    c->event.arg2 = g_chip.from * TABLE_COLS_MAX + to;
+                }
+            } else if (inside(rect[g_chip.from], c->mouse)) {
+                set_event(c, PAGE_EVENT_TABLE_COL, idx, NULL);
+                c->event.arg2 = t->col_order[g_chip.from];
+            }
+            g_chip.active = false;
+        }
+
+        if (ghost.w > 0) draw_chip_ghost(c, t->cols[ghost_col],
+                                         t->col_show[ghost_col], ghost);
         gap(c, 1);
     }
 

@@ -149,7 +149,10 @@ void table_load(Table *t, const char *cwd, const char *rel)
     }
     fclose(f);
 
-    for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
+    for (int i = 0; i < t->col_count; i++) {
+        t->col_show[i] = true;
+        t->col_order[i] = i;
+    }
 
     // Колонка из одних пустых ячеек числовой не считается: равнять там
     // нечего, а правый край выглядел бы ошибкой.
@@ -162,35 +165,58 @@ void table_load(Table *t, const char *cwd, const char *rel)
 
 void table_set_cols(Table *t, const char *spec)
 {
-    for (int i = 0; i < t->col_count; i++) t->col_show[i] = !spec || !*spec;
+    for (int i = 0; i < t->col_count; i++) {
+        t->col_order[i] = i;
+        t->col_show[i] = true;
+    }
     if (!spec || !*spec) return;
 
-    int on = 0;
+    bool placed[TABLE_COLS_MAX] = { false };
+    int n = 0;
     const char *p = spec;
     while (*p) {
         const char *sep = strchr(p, '|');
         size_t len = sep ? (size_t)(sep - p) : strlen(p);
-        for (int i = 0; i < t->col_count; i++)
-            if (strlen(t->cols[i]) == len && !strncmp(t->cols[i], p, len)) {
-                t->col_show[i] = true;
-                on++;
-            }
+        bool hide = len > 0 && *p == '-';
+        const char *name = hide ? p + 1 : p;
+        size_t nlen = hide ? len - 1 : len;
+        for (int i = 0; i < t->col_count; i++) {
+            if (placed[i] || strlen(t->cols[i]) != nlen || strncmp(t->cols[i], name, nlen))
+                continue;
+            placed[i] = true;
+            t->col_order[n++] = i;
+            t->col_show[i] = !hide;
+            break;
+        }
         if (!sep) break;
         p = sep + 1;
     }
-    if (!on) for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
+    if (n == 0) return;   // ни одного знакомого имени — оставляем как в файле
+
+    // Колонки, которых в списке не было: агент дописал их после того, как
+    // человек настроил вид. Встают в конец и видимыми — пропасть молча они
+    // не должны.
+    for (int i = 0; i < t->col_count; i++)
+        if (!placed[i]) { t->col_order[n++] = i; t->col_show[i] = true; }
+
+    bool any = false;
+    for (int i = 0; i < t->col_count; i++) any = any || t->col_show[i];
+    if (!any) for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
 }
 
 void table_cols_spec(const Table *t, char *out, size_t cap)
 {
     out[0] = '\0';
-    bool all = true;
-    for (int i = 0; i < t->col_count; i++) if (!t->col_show[i]) all = false;
-    if (all) return;
+    bool plain = true;
+    for (int k = 0; k < t->col_count; k++)
+        if (t->col_order[k] != k || !t->col_show[t->col_order[k]]) plain = false;
+    if (plain) return;
+
     size_t used = 0;
-    for (int i = 0; i < t->col_count; i++) {
-        if (!t->col_show[i]) continue;
-        int n = snprintf(out + used, cap - used, "%s%s", used ? "|" : "", t->cols[i]);
+    for (int k = 0; k < t->col_count; k++) {
+        int i = t->col_order[k];
+        int n = snprintf(out + used, cap - used, "%s%s%s", used ? "|" : "",
+                         t->col_show[i] ? "" : "-", t->cols[i]);
         if (n < 0 || (size_t)n >= cap - used) break;
         used += (size_t)n;
     }
