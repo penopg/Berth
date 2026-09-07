@@ -1519,49 +1519,70 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
     for (int i = 0; i < al->count; i++) {
         const Action *a = &al->items[i];
         bool open = s->page_action_open == i + 1;
-        // Подсветка ровно по строке: у раскрытого действия вторая строка —
-        // это уже его текст, и подложка висела бы над ним куском.
+
+        // Имя рисуем той плашкой, какой оно станет на странице таблицы.
+        // Строка «Посмотрел» ни о чём не говорит — через неделю это слово
+        // не отличить от статуса; кнопка «Посмотрел» говорит сама за себя.
+        int chip_w = chars_of(a->name) * cw + 20;
+        int chip_h = c->line + 6;
         Rect r = { c->x - 8, c->y - 3, content_width(c) + 16,
-                   c->line * (open ? 1 : 2) + 6 };
+                   chip_h + (open ? 6 : c->line + 6) };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
+
+        DrawRectangleLines(c->x, c->y, chip_w, chip_h,
+                           hover ? th->row_text_dim : th->sidebar_border);
+        ui_text_clipped(c->font, a->name, c->x + 10, c->y + 3, th->row_text, chip_w - 16);
 
         // Справа — где кнопка стоит и куда уходит. Дорога цветом: разговор
         // акцентом (он заговорит с тобой), задача приглушённо (сделает молча).
         // Имя таблицы показываем, только когда их больше одной: у одной оно в
         // каждой строке — шум.
-        const char *where = a->scope == ACTION_ROW ? "запись" : "таблица";
+        const char *where = a->scope == ACTION_ROW ? "у записи" : "у таблицы";
         const char *road = a->to_task ? "задача" : "разговор";
         char meta[96];
         if (tables > 1) {
             const char *base = strrchr(a->target, '/');
-            snprintf(meta, sizeof(meta), "%s · %s · ", where, base ? base + 1 : a->target);
+            snprintf(meta, sizeof(meta), "%s %s · ", where, base ? base + 1 : a->target);
         } else {
             snprintf(meta, sizeof(meta), "%s · ", where);
         }
         int rw = (chars_of(meta) + chars_of(road)) * cw;
         int right = c->x + content_width(c);
-        int mw = ui_text_clipped(c->font, meta, right - rw, c->y, th->row_text_dim, rw);
-        ui_text_clipped(c->font, road, right - rw + mw, c->y,
+        int mw = ui_text_clipped(c->font, meta, right - rw, c->y + 3, th->row_text_dim, rw);
+        ui_text_clipped(c->font, road, right - rw + mw, c->y + 3,
                         a->to_task ? th->row_text_dim : th->progress_fill, rw - mw);
-        ui_text_clipped(c->font, a->name, c->x, c->y, th->row_text,
-                        right - rw - c->x - cw);
-        c->y += c->line;
+        c->y += chip_h + SP_ROW;
 
         if (hover && c->click) set_event(c, PAGE_EVENT_ACTION_TOGGLE, i, NULL);
-        if (open) {
-            body_text(c, a->text, cw * 2, th->row_text);
-            c->y += SP_BLOCK;
-            row_begin(c);
-            c->row_x = c->x + cw * 2;
-            if (button_kind(c, "Удалить", BTN_DANGER))
-                set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
-            row_end(c);
-        } else {
+
+        if (!open) {
             ui_text_clipped(c->font, a->text, c->x + cw * 2, c->y,
                             th->row_text_dim, content_width(c) - cw * 2);
             c->y += c->line + SP_ROW;
+            continue;
         }
+
+        // Раскрытое — свой блок с линейкой слева: без неё «Удалить» вставало
+        // вплотную к следующему действию и читалось его кнопкой.
+        int block_top = c->y;
+        char what[160];
+        snprintf(what, sizeof(what), "Кнопка %s таблицы %s. Клик отправляет %s:",
+                 a->scope == ACTION_ROW ? "у каждой записи" : "у",
+                 strrchr(a->target, '/') ? strrchr(a->target, '/') + 1 : a->target,
+                 a->to_task ? "задачей, молча" : "репликой в разговор");
+        ui_text_clipped(c->font, what, c->x + cw * 2, c->y, th->row_text_dim,
+                        content_width(c) - cw * 2);
+        c->y += c->line;
+        body_text(c, a->text, cw * 2, th->row_text);
+        c->y += SP_ROW;
+        row_begin(c);
+        c->row_x = c->x + cw * 2;
+        if (button_kind(c, "Удалить", BTN_DANGER))
+            set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
+        row_end(c);
+        DrawRectangle(c->x + 3, block_top, 1, c->y - block_top - 6, th->sidebar_border);
+        c->y += SP_ROW;
     }
 
     if (al->count == 0)
