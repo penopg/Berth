@@ -1116,6 +1116,40 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         break;
     }
 
+    case PAGE_EVENT_ACTION_TOGGLE:
+        s->page_action_open = (s->page_action_open == ev.arg + 1) ? 0 : ev.arg + 1;
+        break;
+
+    case PAGE_EVENT_ACTIONS_EDIT: {
+        char target[PROJECT_PATH_MAX + 64];
+        snprintf(target, sizeof(target), "%s/%s", s->cwd, ACTIONS_FILE);
+        open_with(target, "-t");
+        break;
+    }
+
+    // Кнопку заводит агент: текст действия — это промпт, и сочинять его
+    // ему сподручнее, чем человеку через поля ввода. Берт лишь начинает
+    // разговор с нужной просьбы.
+    case PAGE_EVENT_ACTIONS_NEW: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        char prompt[600];
+        if (st && st->table_count > 0)
+            snprintf(prompt, sizeof(prompt),
+                     "По скиллу berth-actions заведи кнопку над данными проекта. "
+                     "На странице показана таблица %s. Спроси, что она должна "
+                     "делать, к чему прикрепить и куда девать результат, и допиши "
+                     "строку в .berth/actions.tsv.", st->tables[0].path);
+        else
+            snprintf(prompt, sizeof(prompt),
+                     "По скиллу berth-actions заведи кнопку над данными проекта: "
+                     "спроси, над какой таблицей, что она должна делать и куда "
+                     "девать результат, и допиши строку в .berth/actions.tsv.");
+        say_to_conversation(app, s, s->cwd, prompt, cols, rows);
+        int main = session_of_project(&app->sessions, s->cwd);
+        if (main >= 0) { session_activate(&app->sessions, main); resize_all(app); }
+        break;
+    }
+
     case PAGE_EVENT_TWO_COLUMNS:
         app->settings.page_two_columns = !app->settings.page_two_columns;
         save_settings(app);

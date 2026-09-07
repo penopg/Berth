@@ -1462,6 +1462,64 @@ static const char *parent_of(const ProjectList *projects, const char *cwd)
     return projects->items[projects->items[i].parent].path;
 }
 
+// Раздел «Действия» — оснастка проекта, рядом со скиллами: кнопки над
+// данными живут одним файлом на проект, а к таблицам только прикрепляются.
+// Здесь их смотрят и правят; работают они там, где прикреплены.
+static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
+                                 int tables)
+{
+    if (al->count == 0 && tables == 0) return;
+
+    const int cw = c->font->cell_width;
+    char head[64];
+    snprintf(head, sizeof(head), al->count ? "Действия · %d" : "Действия", al->count);
+    if (section_action(c, head, al->exists ? "Править" : NULL))
+        set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
+
+    for (int i = 0; i < al->count; i++) {
+        const Action *a = &al->items[i];
+        bool open = s->page_action_open == i + 1;
+        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * 2 + 6 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+
+        // Справа — где кнопка стоит и куда уходит: по этим двум словам
+        // действие узнаётся, не читая текста.
+        const char *base = strrchr(a->target, '/');
+        base = base ? base + 1 : a->target;
+        char where[96];
+        snprintf(where, sizeof(where), "%s · %s · %s",
+                 a->scope == ACTION_ROW ? "запись" : "таблица", base,
+                 a->to_task ? "задача" : "разговор");
+        int ww = chars_of(where) * cw;
+        int right = c->x + content_width(c);
+        ui_text_clipped(c->font, where, right - ww, c->y, c->theme->row_text_dim, ww);
+        ui_text_clipped(c->font, a->name, c->x, c->y, c->theme->row_text,
+                        right - ww - c->x - cw);
+        c->y += c->line;
+
+        if (hover && c->click) set_event(c, PAGE_EVENT_ACTION_TOGGLE, i, NULL);
+        if (open) {
+            body_text(c, a->text, cw * 2, c->theme->row_text);
+            gap(c, 1);
+        } else {
+            ui_text_clipped(c->font, a->text, c->x + cw * 2, c->y,
+                            c->theme->row_text_dim, content_width(c) - cw * 2);
+            c->y += c->line;
+        }
+        gap(c, 0);
+        c->y += 4;
+    }
+
+    if (al->count == 0)
+        text(c, "кнопок над данными пока нет", c->theme->row_text_dim);
+
+    row_begin(c);
+    if (button(c, "Завести кнопку", false))
+        set_event(c, PAGE_EVENT_ACTIONS_NEW, 0, NULL);
+    row_end(c);
+}
+
 // Скиллы проекта — строкой на скилл: имя, описание из шапки. Клик
 // раскрывает первый абзац SKILL.md — чтобы вспомнить, что он делает; читать
 // и править целиком — дело редактора, для этого «Изменить». Своих скиллов
@@ -2082,11 +2140,6 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
                 c->row_x = c->x + cw * 2;
                 actions_buttons(c, s, al, t, r, ACTION_ROW);
                 row_end(c);
-            } else if (al->count == 0) {
-                // Механизм невидим, пока у проекта нет ни одной кнопки:
-                // строчка-подсказка и есть способ о нём узнать.
-                text(c, "действий нет — попроси агента завести кнопку над этой таблицей",
-                     th->row_text_dim);
             }
             if (action_form_here(s, r)) draw_editor(c, cw * 2);
             reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
@@ -2550,8 +2603,9 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     // перед оснасткой.
     draw_files(&c, s, &st->files);
 
-    // Скиллы — последними: это оснастка проекта, к ней ходят реже, чем к
-    // задачам.
+    // Действия и скиллы — оснастка проекта, последними: к ним ходят реже,
+    // чем к задачам.
+    draw_actions_section(&c, s, &st->actions, st->table_count);
     draw_skills(&c, s, projects);
 
     if (wide) {
