@@ -164,17 +164,19 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
     // волосок — нет.
     DrawRectangle(c->x - 8, c->y - 4, w + 16, c->line + 8, c->theme->row_active_bg);
     int hit = 0;
+    // Подсветка действия — во всю высоту полосы и с отступом от её края:
+    // прямоугольник ниже полосы прилипал к верхнему краю и упирался вправо.
     int right = c->x + w;
     for (int i = 0; i < n; i++) {
         if (!acts[i]) continue;
         int aw = chars_of(acts[i]) * c->font->cell_width;
-        Rect r = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
+        Rect r = { right - aw - 16, c->y - 4, aw + 16, c->line + 8 };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
         ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
                         hover ? c->theme->row_text : c->theme->row_text_dim, aw);
         if (hover && c->click) hit = i + 1;
-        right = r.x - 8;
+        right = r.x - 4;
     }
 
     int room = right - c->x - 8;
@@ -604,7 +606,8 @@ static struct {
     bool asking;
     bool ask_task;                 // отправить молча задачей, а не в разговор
     char ask_head[160];            // подпись карточки
-    char ask_ctx[2048];
+    char ask_hint[512];            // чем берт дополнит просьбу — словами
+    char ask_ctx[2048];            // чем дополнит на самом деле — агенту
 
     // Новый проект в группе: cwd — папка группы, group — её имя, notice —
     // отказ прошлой попытки (папка есть, имя плохое).
@@ -846,11 +849,12 @@ static void edit_begin_action(const char *cwd, int index, int row, const char *t
     snprintf(g_edit.tmpl, sizeof(g_edit.tmpl), "%s", tmpl);
 }
 
-void page_ask_begin(const char *cwd, const char *head, const char *ctx)
+void page_ask_begin(const char *cwd, const char *head, const char *hint, const char *ctx)
 {
     edit_begin(cwd, -1, NULL);
     g_edit.asking = true;
     snprintf(g_edit.ask_head, sizeof(g_edit.ask_head), "%s", head ? head : "Попросить агента");
+    snprintf(g_edit.ask_hint, sizeof(g_edit.ask_hint), "%s", hint ? hint : "");
     snprintf(g_edit.ask_ctx, sizeof(g_edit.ask_ctx), "%s", ctx ? ctx : "");
     g_edit.cursor = 0;
 }
@@ -1704,7 +1708,12 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
         snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx),
                  "Таблицы проекта: %s\nФормат файла и правила — в скилле berth-actions.",
                  tl[0] ? tl : "нет");
-        page_ask_begin(s->cwd, "Попросить агента · Действия", ctx);
+        page_ask_begin(s->cwd, "Попросить агента · Действия",
+                       "Вместе с просьбой уйдёт устройство раздела: какие кнопки "
+                       "заведены, к каким таблицам привязаны, куда шлют результат, "
+                       "какие таблицы есть в проекте и где описан формат файла. "
+                       "Перечислять это словами не нужно — хватит сказать, что "
+                       "должно получиться.", ctx);
     }
 
     // Мини-таблица с шапкой. Плашка-имя врала: выглядела кнопкой, а нажать
@@ -1789,7 +1798,12 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
                      tl[0] ? tl : "нет");
             char title[ACTION_NAME_MAX + 40];
             snprintf(title, sizeof(title), "Попросить агента · «%s»", a->name);
-            page_ask_begin(s->cwd, title, ctx);
+            page_ask_begin(s->cwd, title,
+                           "Вместе с просьбой уйдёт сама кнопка: её текст, к чему "
+                           "привязана и куда шлёт результат, плюс список таблиц "
+                           "проекта и где описан формат файла. Пересказывать это "
+                           "не нужно — «поправь так-то» или «повтори для другой "
+                           "таблицы» агенту хватит.", ctx);
         }
         if (button_kind(c, "Удалить", BTN_DANGER))
             set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
@@ -3046,10 +3060,18 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
         .font = font, .theme = theme, .view = card, .mouse = mouse,
         .click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
         .x = card.x + PAD_X, .y = card.y + PAD_Y,
+        // Ширина колонки: по ней меряется и переносится весь текст карточки.
+        // Без неё content_width() отдаёт ноль, и подписи с контекстом просто
+        // не рисуются — карточка выглядит пустой.
+        .col_w = card.w - PAD_X * 2,
         .line = font->cell_height + 4,
         .list_sub = -1,
         .event = { .sub = -1 },
     };
+
+    // Затемнение под карточкой: она модальная — пока открыта, окно её и
+    // ждёт. Без него карточка висела «непонятно где» посреди страницы.
+    DrawRectangle(view.x, view.y, view.w, view.h, (Color){ 0, 0, 0, 60 });
 
     // Тень и подложка: карточка должна читаться поверх терминала, а не
     // сливаться с ним.
@@ -3060,24 +3082,12 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
     DrawRectangleLines(card.x, card.y, card.w, card.h, theme->group_label);
 
     if (g_edit.asking) {
-        // Контекст показан целиком: человек должен видеть, что уйдёт вместе
-        // с его словами. Приглушённо — это не то, что он пишет.
+        // Что уйдёт вместе с просьбой — сказано механикой, а не выгрузкой
+        // самих строк: человеку нужно знать, чего не надо пересказывать, а
+        // не читать файл, который он и так может открыть.
         text(&c, g_edit.ask_head, theme->row_text);
-        // Контекст рисуем построчно: body_text склеивает одиночные переводы
-        // строки в абзац (так задумано для описаний задач), а здесь каждая
-        // строка — своя запись, и слипаться им нельзя.
         gap(&c, 1);
-        const char *p = g_edit.ask_ctx;
-        while (*p) {
-            const char *nl = strchr(p, '\n');
-            size_t n = nl ? (size_t)(nl - p) : strlen(p);
-            char line[512];
-            snprintf(line, sizeof(line), "%.*s", (int)(n < sizeof(line) - 1 ? n : sizeof(line) - 1), p);
-            if (line[0]) draw_wrapped(&c, line, c.x, content_width(&c), theme->row_text_dim, true);
-            else         gap(&c, 1);
-            if (!nl) break;
-            p = nl + 1;
-        }
+        draw_wrapped(&c, g_edit.ask_hint, c.x, content_width(&c), theme->row_text_dim, true);
         gap(&c, 1);
     } else {
         char head[PROJECT_NAME_MAX + 32];

@@ -1120,7 +1120,13 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         const ProjectState *st = projstate_peek(s->cwd);
         if (!st || ev.arg < 0 || ev.arg >= st->actions.count || !ev.prompt) break;
         const Action *a = &st->actions.items[ev.arg];
-        send_prompt(app, s, ev.prompt, a->to_task, a->name, cols, rows);
+        // К какой таблице кнопка прикреплена, знает берт — и говорит это
+        // сам. В тексте действия таблицы может не быть вовсе («/watchlist-pick»),
+        // и пока таблица была одна, это сходило с рук; со второй агенту
+        // осталось бы гадать, в каком файле отмечать просмотренное.
+        char full[ACTION_TEXT_MAX * 2 + ACTION_TARGET_MAX + 32];
+        snprintf(full, sizeof(full), "%s\n\nТаблица: %s", ev.prompt, a->target);
+        send_prompt(app, s, full, a->to_task, a->name, cols, rows);
         break;
     }
 

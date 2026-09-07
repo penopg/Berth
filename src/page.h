@@ -164,7 +164,9 @@ void      page_new_project_failed(const char *why);   // вернуть реда
 bool      page_overlay_active(void);
 // Окно просьбы агенту: контекст собирает берт (что за место, какие файлы),
 // слова пишет человек. Рисуется карточкой поверх окна, как новый проект.
-void page_ask_begin(const char *cwd, const char *head, const char *ctx);
+// hint — чем берт дополнит просьбу, сказанное человеку механикой; ctx —
+// то, что уйдёт агенту на самом деле.
+void page_ask_begin(const char *cwd, const char *head, const char *hint, const char *ctx);
 
 PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
                             Rect view, Vector2 mouse);
