@@ -66,6 +66,14 @@ typedef enum {
     PAGE_EVENT_TABLE_ROW,        // раскрыть запись arg2 таблицы arg
     PAGE_EVENT_TABLE_ALL,        // показать все записи таблицы arg
     PAGE_EVENT_TABLE_OPEN,       // открыть файл таблицы arg
+    // Действие над данными: arg — номер в ActionList, event.prompt — готовая
+    // реплика (подстановки уже сделаны, форма заполнена).
+    PAGE_EVENT_ACTION_RUN,
+    PAGE_EVENT_ACTION_TOGGLE,    // раскрыть действие в разделе «Действия»
+    PAGE_EVENT_ACTIONS_EDIT,     // открыть .berth/actions.tsv в редакторе
+    PAGE_EVENT_ACTIONS_NEW,      // попросить агента завести кнопку
+    PAGE_EVENT_ACTION_NEW_FOR,   // …над таблицей arg: контекст выбран местом
+    PAGE_EVENT_ACTION_REMOVE,    // убрать действие arg из файла
     PAGE_EVENT_TWO_COLUMNS,      // сложить страницу в одну колонку и обратно
     PAGE_EVENT_TABLE_CFG,        // открыть или закрыть настройку колонок
     PAGE_EVENT_TABLE_COL,        // показывать колонку arg2 таблицы arg или нет
@@ -105,6 +113,10 @@ typedef struct {
     // кадра). sub — его порядковый номер среди подпроектов, -1 у своих.
     const char *cwd;
     int  sub;
+
+    // Готовая реплика действия: указывает на буфер страницы, живёт до
+    // следующего кадра — исполнителю события этого хватает.
+    const char *prompt;
 
     // Текст задачи из редактора страницы. Указатели на буферы редактора —
     // живут до следующего кадра, чего исполнителю события хватает.

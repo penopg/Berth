@@ -9,6 +9,7 @@
 #include "input.h"
 #include "utf8.h"
 #include "skills_builtin.h"
+#include "actions.h"
 
 // Состояние вывода на время одного кадра: где рисуем, чем и что уже нажали.
 typedef struct {
@@ -67,6 +68,7 @@ static Ctx ctx_begin(const FontAtlas *font, const Theme *theme,
 // прокрученное не наезжало на шапку.
 static void scroll_begin(Ctx *c)
 {
+    ui_clip_rows(c->view.y, c->view.y + c->view.h);
     c->scroll_top = c->y;
     c->y -= c->scroll;
     EndScissorMode();
@@ -78,6 +80,7 @@ static void scroll_begin(Ctx *c)
 // нарисовали, столько и есть — заранее эту высоту неоткуда взять.
 static int ctx_end(const Ctx *c)
 {
+    ui_clip_rows(0, 0);   // дальше рисует панель: ей отсечение не нужно
     EndScissorMode();
     if (!c->scroll_top) return 0;
     int content = c->y + c->scroll - c->scroll_top;
@@ -115,16 +118,103 @@ static void gap(Ctx *c, int lines)
     c->y += c->line * lines / 2;
 }
 
-// Заголовок раздела: приглушённый, с тонкой чертой под ним. Разделы на
-// странице различаются глазом, а не отступом.
+// Шкала отступов. Кегль на странице один — второй означал бы второй атлас, —
+// поэтому расстояния и есть та иерархия, которую в вёрстке обычно несёт
+// размер шрифта. Правило: заголовок ближе к своему содержимому, чем к
+// чужому. Раньше эти числа стояли по месту, и разделы читались сплошняком.
+enum {
+    SP_SECTION = 30,   // перед заголовком раздела — самый большой отступ
+    SP_HEAD    = 10,   // от черты заголовка до первой строки: подсветка
+                       // первой строки не должна упираться в черту
+    SP_ROW     = 4,    // между строками списка
+    SP_BLOCK   = 10,   // между строкой и её раскрытым содержимым
+};
+
+static bool inside(Rect r, Vector2 m);
+static bool visible_hit(const Ctx *c, Vector2 p);
+
+// Заголовок раздела с необязательными действиями у правого края; возвращает
+// номер нажатого (1..n) или 0. Имя раздела — полным цветом, всё после « · »
+// приглушённо: счёт и время это мета, а не заголовок. До этого заголовок
+// целиком был приглушённым и оказывался бледнее собственного содержимого —
+// иерархия читалась наоборот.
+// Балун подсказки: что это за раздел. Рисуется в конце кадра — иначе всё,
+// что нарисовано после него, его перекроет; тот же приём, что у балуна
+// лимитов в верхней полосе.
+// Текста на 1024 байта: кириллица идёт по два байта на знак, и на 400
+// подсказка обрывалась на полуслове.
+static struct { bool on; int x, y; char text[1024]; } g_tip;
+
+static void tip_at(int x, int y, const char *text)
+{
+    g_tip.on = true;
+    g_tip.x = x;
+    g_tip.y = y;
+    snprintf(g_tip.text, sizeof(g_tip.text), "%s", text);
+}
+
+static int section_head(Ctx *c, const char *title, const char *const *acts, int n,
+                        const char *help)
+{
+    c->y += SP_SECTION;
+    int w = content_width(c);
+    // Полоса, а не черта во всю ширину. Шесть одинаковых волосков через
+    // равные промежутки читались гребёнкой — «здесь всё однородное», ровно
+    // наоборот тому, что они должны говорить. Масса видна прищурившись,
+    // волосок — нет.
+    DrawRectangle(c->x - 8, c->y - 4, w + 16, c->line + 8, c->theme->row_active_bg);
+    int hit = 0;
+    int right = c->x + w;
+    for (int i = 0; i < n; i++) {
+        if (!acts[i]) continue;
+        int aw = chars_of(acts[i]) * c->font->cell_width;
+        Rect r = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+        ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
+                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
+        if (hover && c->click) hit = i + 1;
+        right = r.x - 8;
+    }
+
+    int room = right - c->x - 8;
+    const char *meta = strstr(title, " · ");
+    int tw = 0;
+    if (meta) {
+        char head[96];
+        snprintf(head, sizeof(head), "%.*s", (int)(meta - title), title);
+        int hw = ui_text_clipped(c->font, head, c->x, c->y, c->theme->row_text, room);
+        tw = hw + ui_text_clipped(c->font, meta, c->x + hw, c->y, c->theme->row_text_dim,
+                                  room - hw);
+    } else {
+        tw = ui_text_clipped(c->font, title, c->x, c->y, c->theme->row_text, room);
+    }
+    // «(?)» после заголовка: что это за раздел, словами и только по запросу
+    // глазами. Постоянная подпись под каждым разделом отняла бы по две
+    // строки у всех и читалась бы шумом.
+    if (help) {
+        // Кружок с вопросом рисуем примитивами: глиф такой формы есть только
+        // в запасках, и промах дал бы «?» в рамке — ровно то, чего не надо.
+        int hx = c->x + tw + c->font->cell_width;
+        int hr_px = c->font->cell_height / 2 - 1;
+        Rect hit = { hx - 2, c->y, (float)hr_px * 2 + 6, c->line };
+        bool hover = inside(hit, c->mouse) && visible_hit(c, c->mouse);
+        Color hc = hover ? c->theme->row_text : c->theme->row_text_dim;
+        float cx = (float)hx + (float)hr_px + 1;
+        float cy = (float)c->y + (float)c->font->cell_height / 2.0f;
+        DrawCircleLines((int)cx, (int)cy, (float)hr_px, hc);
+        font_draw_codepoint(c->font, '?', cx - (float)c->font->cell_width / 2.0f,
+                            (float)c->y, (float)c->font->size, hc);
+        if (hover) tip_at(hx, c->y, help);
+    }
+    c->y += c->line;
+    c->y += SP_HEAD;
+    return hit;
+}
+
 static void section(Ctx *c, const char *title)
 {
-    gap(c, 2);
-    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label,
-                    content_width(c));
-    c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, content_width(c), 1, c->theme->sidebar_border);
-    gap(c, 1);
+    section_head(c, title, NULL, 0, NULL);
 }
 
 static bool inside(Rect r, Vector2 m);
@@ -176,7 +266,13 @@ static void row_end(Ctx *c)
     c->y += c->line + 10;
 }
 
-static bool button(Ctx *c, const char *label, bool accent)
+// Три веса кнопки. Главная — заливка с акцентной чертой; обычная — заливка,
+// приглушённый текст; тихая — без заливки, только слово, и подсвечивается под
+// курсором. Разрушительная — тихая, но краснеет: одинаковые плашки у «Убрать»
+// и «Новое действие» читались как один ряд равноправных команд.
+typedef enum { BTN_PLAIN, BTN_ACCENT, BTN_QUIET, BTN_DANGER } ButtonKind;
+
+static bool button_kind(Ctx *c, const char *label, ButtonKind kind)
 {
     int chars = chars_of(label);
 
@@ -198,17 +294,33 @@ static bool button(Ctx *c, const char *label, bool accent)
     c->row_used = true;
 
     bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-    Color bg = hover ? c->theme->row_hover_bg : c->theme->row_active_bg;
-    DrawRectangle(r.x, r.y, r.w, r.h, bg);
-    if (accent)
+    bool quiet = kind == BTN_QUIET || kind == BTN_DANGER;
+    if (!quiet || hover) {
+        Color bg = hover ? c->theme->row_hover_bg : c->theme->row_active_bg;
+        DrawRectangle(r.x, r.y, r.w, r.h, bg);
+    }
+    // Тихая кнопка без заливки сливалась со строкой текста: она читалась
+    // подписью, а не кнопкой. Тонкая обводка возвращает ей границы, не
+    // возвращая массы.
+    if (quiet)
+        DrawRectangleLines(r.x, r.y, r.w, r.h,
+                           hover ? c->theme->row_text_dim : c->theme->sidebar_border);
+    if (kind == BTN_ACCENT)
         DrawRectangle(r.x, r.y, 3, r.h, c->theme->progress_fill);
 
-    ui_text_clipped(c->font, label, r.x + 12, r.y + 6,
-                    accent ? c->theme->row_text : c->theme->row_text_dim,
-                    r.w - 20);
+    Color fg = c->theme->row_text_dim;
+    if (kind == BTN_ACCENT) fg = c->theme->row_text;
+    if (kind == BTN_DANGER && hover) fg = c->theme->badge_dead;
+    if (kind == BTN_QUIET && hover) fg = c->theme->row_text;
+    ui_text_clipped(c->font, label, r.x + 12, r.y + 6, fg, r.w - 20);
 
     c->row_x = r.x + r.w + 8;
     return hover && c->click;
+}
+
+static bool button(Ctx *c, const char *label, bool accent)
+{
+    return button_kind(c, label, accent ? BTN_ACCENT : BTN_PLAIN);
 }
 
 // Кликабельная строка во всю ширину — для списка сессий.
@@ -225,55 +337,29 @@ static bool visible_hit(const Ctx *c, Vector2 p)
 // Действие живёт рядом с тем, на что действует, а не в общем ряду кнопок
 // сверху, где «Обновить сводку» и «Собрать журнал» стояли без контекста.
 // Возвращает true, если по действию нажали.
-// Заголовок с двумя действиями: возвращает 1 или 2 по нажатому. Второе
-// действие стоит левее первого — порядок чтения тот же, что порядок слов.
+// Заголовок с двумя действиями: второе стоит левее первого — порядок чтения
+// тот же, что порядок слов.
 static int section_action2(Ctx *c, const char *title, const char *a1, const char *a2)
 {
-    gap(c, 2);
-    int w = content_width(c);
-    int hit = 0;
-    int right = c->x + w;
     const char *acts[2] = { a1, a2 };
-    for (int i = 0; i < 2; i++) {
-        if (!acts[i]) continue;
-        int aw = chars_of(acts[i]) * c->font->cell_width;
-        Rect r = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
-        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
-                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
-        if (hover && c->click) hit = i + 1;
-        right = r.x - 8;
-    }
-    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label,
-                    right - c->x - 8);
-    c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, content_width(c), 1, c->theme->sidebar_border);
-    gap(c, 1);
-    return hit;
+    return section_head(c, title, acts, 2, NULL);
 }
 
+// Заголовок с действием у правого края: «Сводка … Обновить». Действие живёт
+// рядом с тем, на что действует, а не в общем ряду кнопок сверху.
 static bool section_action(Ctx *c, const char *title, const char *action)
 {
-    gap(c, 2);
-    int w = content_width(c);
-    bool hit = false;
-    int title_w = w;
-    if (action) {
-        int aw = chars_of(action) * c->font->cell_width;
-        Rect r = { c->x + w - aw - 8, c->y - 3, aw + 16, c->line + 2 };
-        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        ui_text_clipped(c->font, action, r.x + 8, c->y,
-                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
-        hit = hover && c->click;
-        title_w = w - aw - 24;
-    }
-    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label, title_w);
-    c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, w, 1, c->theme->sidebar_border);
-    gap(c, 1);
-    return hit;
+    const char *acts[1] = { action };
+    return section_head(c, title, acts, 1, NULL) == 1;
+}
+
+// Заголовок с действием и знаком «(?)»: у разделов, про которые с ходу
+// непонятно, что это и откуда берётся.
+static bool section_help(Ctx *c, const char *title, const char *action,
+                         const char *help)
+{
+    const char *acts[1] = { action };
+    return section_head(c, title, acts, 1, help) == 1;
 }
 
 // Складная строка внутри раздела: стрелка ▸/▾, заголовок и приглушённая
@@ -503,6 +589,15 @@ static struct {
                            // просим страницу показать его целиком
     char title[TASK_TITLE_MAX];
     char body[TASK_BODY_MAX];
+    // Форма перед действием: поля выведены из шаблона — это подстановки,
+    // которых нет в записи. Названия полей и есть имена подстановок.
+    bool action;
+    int  action_index;                       // номер в ActionList
+    int  ask_n;
+    char ask[ACTION_ASK_MAX][ACTION_LABEL_MAX];
+    char answer[ACTION_ASK_MAX][ACTION_TEXT_MAX];
+    char tmpl[ACTION_TEXT_MAX * 2];          // шаблон с уже подставленной записью
+
     // Новый проект в группе: cwd — папка группы, group — её имя, notice —
     // отказ прошлой попытки (папка есть, имя плохое).
     bool project;
@@ -607,6 +702,9 @@ static int seg_offset_at(const FontAtlas *a, const char *text, const Seg *s, flo
 
 static void seg_draw(Ctx *c, const char *text, const Seg *s, float x, float y, Color color)
 {
+    // Строка вне окна — не рисуем: раскладке она не нужна, а глифы стоят.
+    if (y + (float)c->font->cell_height < (float)c->view.y
+        || y > (float)(c->view.y + c->view.h)) return;
     for (int i = s->start; i < s->start + s->len; ) {
         int sz = 0;
         int cp = GetCodepointNext(text + i, &sz);
@@ -617,13 +715,44 @@ static void seg_draw(Ctx *c, const char *text, const Seg *s, float x, float y, C
     }
 }
 
+static void draw_tip(Ctx *c)
+{
+    if (!g_tip.on) return;
+    g_tip.on = false;
+    int w = c->font->cell_width * 46;
+    if (w > c->view.w - 32) w = c->view.w - 32;
+    Seg segs[SEG_MAX];
+    int n = wrap_segments(c->font, g_tip.text, w - 16, segs, SEG_MAX);
+    int h = n * c->line + 12;
+    int x = g_tip.x - 8;
+    int y = g_tip.y + c->line + 6;
+    if (x + w > c->view.x + c->view.w - 8) x = c->view.x + c->view.w - w - 8;
+    if (x < c->view.x + 8) x = c->view.x + 8;
+    if (y + h > c->view.y + c->view.h - 8) y = g_tip.y - h - 6;
+    DrawRectangle(x + 2, y + 2, w, h, (Color){ 0, 0, 0, 30 });
+    DrawRectangle(x, y, w, h, c->theme->row_active_bg);
+    DrawRectangleLines(x, y, w, h, c->theme->sidebar_border);
+    float ty = (float)(y + 6);
+    for (int i = 0; i < n; i++) {
+        seg_draw(c, g_tip.text, &segs[i], (float)(x + 8), ty, c->theme->row_text);
+        ty += (float)c->line;
+    }
+}
+
+static int edit_fields(void)
+{
+    return g_edit.action ? g_edit.ask_n : 2;
+}
+
 static char *edit_buf(void)
 {
+    if (g_edit.action) return g_edit.answer[g_edit.field];
     return g_edit.field == 0 ? g_edit.title : g_edit.body;
 }
 
 static size_t edit_cap(void)
 {
+    if (g_edit.action) return sizeof(g_edit.answer[0]);
     return g_edit.field == 0 ? sizeof(g_edit.title) : sizeof(g_edit.body);
 }
 
@@ -691,6 +820,19 @@ static void edit_begin_skill(const char *cwd)
 {
     edit_begin(cwd, -1, NULL);
     g_edit.skill = true;
+}
+
+// Форма перед действием: поля — подстановки, которых не нашлось в записи.
+static void edit_begin_action(const char *cwd, int index, int row, const char *tmpl,
+                              char ask[][ACTION_LABEL_MAX], int n)
+{
+    edit_begin(cwd, row, NULL);   // index — запись, под которой рисовать форму
+    g_edit.action = true;
+    g_edit.action_index = index;
+    g_edit.ask_n = n;
+    for (int i = 0; i < n; i++)
+        snprintf(g_edit.ask[i], ACTION_LABEL_MAX, "%s", ask[i]);
+    snprintf(g_edit.tmpl, sizeof(g_edit.tmpl), "%s", tmpl);
 }
 
 void page_new_project_begin(const char *root, const char *group)
@@ -776,16 +918,34 @@ static int edit_keys(void)
     if (key_hit(KEY_END))       g_edit.cursor = (int)strlen(buf);
 
     if (IsKeyPressed(KEY_TAB)) {
-        g_edit.field = !g_edit.field;
+        g_edit.field = (g_edit.field + 1) % edit_fields();
         g_edit.cursor = (int)strlen(edit_buf());
     }
     if (key_hit(KEY_ENTER) || key_hit(KEY_KP_ENTER)) {
-        if (g_edit.field == 0) {
+        if (g_edit.action) {
+            // Поля формы однострочные: Enter ведёт к следующему, а с
+            // последнего отправляет — форму на два поля заполняют не мышью.
+            if (g_edit.field + 1 < g_edit.ask_n) {
+                g_edit.field++;
+                g_edit.cursor = (int)strlen(edit_buf());
+            } else {
+                return 1;
+            }
+        } else if (g_edit.field == 0) {
             g_edit.field = 1;
             g_edit.cursor = (int)strlen(g_edit.body);
         } else {
             edit_insert("\n", 1);
         }
+    }
+    if (g_edit.action && (key_hit(KEY_UP) || key_hit(KEY_DOWN))) {
+        int step = key_hit(KEY_UP) ? -1 : 1;
+        int next = g_edit.field + step;
+        if (next >= 0 && next < g_edit.ask_n) {
+            g_edit.field = next;
+            g_edit.cursor = (int)strlen(edit_buf());
+        }
+        return 0;
     }
 
     // Вверх и вниз — по видимым строкам описания, как они лежали в прошлом
@@ -891,7 +1051,10 @@ static void draw_editor(Ctx *c, int indent)
     int top = c->y;
 
     gap(c, 1);
-    if (g_edit.project) {
+    if (g_edit.action) {
+        for (int i = 0; i < g_edit.ask_n; i++)
+            edit_field(c, i, g_edit.answer[i], false, g_edit.ask[i], x, width);
+    } else if (g_edit.project) {
         edit_field(c, 0, g_edit.title, false, "Имя папки проекта", x, width);
         edit_field(c, 1, g_edit.body, true, "О чём — одной строкой, попадёт в паспорт", x, width);
     } else if (g_edit.subproject) {
@@ -907,7 +1070,7 @@ static void draw_editor(Ctx *c, int indent)
 
     row_begin(c);
     c->row_x = x;
-    if (button(c, "Сохранить  ⌘↩", true)) action = 1;
+    if (button(c, g_edit.action ? "Отправить  ⌘↩" : "Сохранить  ⌘↩", true)) action = 1;
     if (button(c, "Отмена  esc", false)) action = -1;
     row_end(c);
 
@@ -917,6 +1080,24 @@ static void draw_editor(Ctx *c, int indent)
         g_edit.last_height = c->y - top;
         reveal(c, top, c->y);
     }
+
+    if (action == 1 && g_edit.action) {
+        // Подставляем ответы формы в шаблон — и реплика готова.
+        static char prompt[ACTION_TEXT_MAX * 2];
+        const char *names[ACTION_ASK_MAX], *vals[ACTION_ASK_MAX];
+        for (int i = 0; i < g_edit.ask_n; i++) {
+            rtrim_inplace(g_edit.answer[i]);
+            names[i] = g_edit.ask[i];
+            vals[i] = g_edit.answer[i];
+        }
+        action_expand(g_edit.tmpl, names, vals, g_edit.ask_n, prompt, sizeof(prompt),
+                      NULL, 0);
+        set_event(c, PAGE_EVENT_ACTION_RUN, g_edit.action_index, NULL);
+        c->event.prompt = prompt;
+        g_edit.active = false;
+        return;
+    }
+    if (action == -1 && g_edit.action) { g_edit.active = false; return; }
 
     if (action == 1) {
         rtrim_inplace(g_edit.title);
@@ -1104,7 +1285,7 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
     // странице или редактор подпроекта) здесь не показываем, но и не
     // закрываем: он нарисуется в своём разделе.
     bool editing = g_edit.active && !g_edit.subproject && !g_edit.skill && !g_edit.project
-                && !strcmp(g_edit.cwd, cwd);
+                && !g_edit.action && !strcmp(g_edit.cwd, cwd);
 
     bool down     = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     bool released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
@@ -1268,7 +1449,7 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
     } else {
         gap(c, 1);
         row_begin(c);
-        if (button(c, "Новая задача", false))
+        if (button_kind(c, "+ Новая задача", BTN_QUIET))
             edit_begin(cwd, -1, NULL);
         row_end(c);
     }
@@ -1342,6 +1523,21 @@ static bool section_toggle(Ctx *c, const char *title, bool open)
 // значило бы вытеснить оттуда то, с чем работают.
 static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projects)
 {
+    // Свой заголовок нужен даже когда подпроектов нет: без него «+ Новый
+    // подпроект» висел под задачами и читался их кнопкой.
+    int subs = 0;
+    for (int k = 0; projects && k < projects->count; k++) {
+        const Project *sub = &projects->items[k];
+        if (sub->parent >= 0 && !strcmp(projects->items[sub->parent].path, s->cwd)) subs++;
+    }
+    char head[64];
+    snprintf(head, sizeof(head), subs ? "Подпроекты · %d" : "Подпроекты", subs);
+    section_help(c, head, NULL,
+                 "Папки внутри проекта, где идёт своя работа: у них свой "
+                 "разговор с агентом, свои задачи и паспорт. Берт находит их "
+                 "по истории Claude Code, CLAUDE.md или .berth внутри; "
+                 "исключения — в .berth/subprojects.tsv.");
+
     int q = 0;
     for (int k = 0; projects && k < projects->count; k++) {
         const Project *sub = &projects->items[k];
@@ -1377,9 +1573,9 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
     row_begin(c);
     // «Новый» заводит папку с паспортом — как newproj.sh, но внутри проекта.
     // «Добавить» — для папки, которая уже есть, но признаков не имеет.
-    if (button(c, "Новый подпроект", false))
+    if (button_kind(c, "+ Новый подпроект", BTN_QUIET))
         edit_begin_subproject(s->cwd);
-    if (button(c, "Добавить подпроект", false))
+    if (button_kind(c, "+ Добавить подпроект", BTN_QUIET))
         set_event(c, PAGE_EVENT_ADD_SUBPROJECT, 0, NULL);
     row_end(c);
 }
@@ -1391,6 +1587,123 @@ static const char *parent_of(const ProjectList *projects, const char *cwd)
     int i = projects_find_by_path(projects, cwd);
     if (i < 0 || projects->items[i].parent < 0) return NULL;
     return projects->items[projects->items[i].parent].path;
+}
+
+// Раздел «Действия» — оснастка проекта, рядом со скиллами: кнопки над
+// данными живут одним файлом на проект, а к таблицам только прикрепляются.
+// Здесь их смотрят и правят; работают они там, где прикреплены.
+static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
+                                 int tables)
+{
+    if (al->count == 0 && tables == 0) return;
+
+    const int cw = c->font->cell_width;
+    const Theme *th = c->theme;
+
+    // Имя таблицы в строке нужно, как только целей больше одной: кнопка
+    // привязана к файлу, и «у записи» без имени тогда не отвечает на «где».
+    // При одной таблице имя в каждой строке — повтор.
+    int targets = 0;
+    for (int i = 0; i < al->count; i++) {
+        bool seen = false;
+        for (int k = 0; k < i; k++)
+            if (!strcmp(al->items[k].target, al->items[i].target)) seen = true;
+        if (!seen) targets++;
+    }
+    bool show_target = targets > 1 || tables > 1;
+
+    char head[64];
+    snprintf(head, sizeof(head), al->count ? "Действия · %d" : "Действия", al->count);
+    if (section_help(c, head, al->exists ? "Править файл" : NULL,
+                     "Кнопки над данными: клик собирает реплику из шаблона и "
+                     "отправляет её агенту — задачей, если правка идёт в файл, "
+                     "или в разговор, если ответ надо прочитать. Стоят у записи "
+                     "таблицы и у таблицы целиком. Живут в .berth/actions.tsv, "
+                     "заводит их агент по скиллу berth-actions."))
+        set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
+
+    // Мини-таблица с шапкой. Плашка-имя врала: выглядела кнопкой, а нажать
+    // её было нельзя. Список записей с полями и должен выглядеть списком
+    // записей — тем же способом, каким на этой же странице показана таблица
+    // данных.
+    int name_w = 8;
+    for (int i = 0; i < al->count; i++) {
+        int n = chars_of(al->items[i].name) + 2;   // с кавычками
+        if (n > name_w) name_w = n;
+    }
+    if (name_w > 26) name_w = 26;
+    int where_w = show_target ? 26 : 10;
+    // Колонки разводим на четыре знакоместа: на двух слова смыкались.
+    int col2 = c->x + (name_w + 4) * cw;
+    int col3 = col2 + (where_w + 4) * cw;
+
+    ui_text_clipped(c->font, "кнопка", c->x, c->y, th->row_text_dim, name_w * cw);
+    ui_text_clipped(c->font, "где", col2, c->y, th->row_text_dim, where_w * cw);
+    ui_text_clipped(c->font, "куда", col3, c->y, th->row_text_dim, cw * 10);
+    c->y += c->line;
+    DrawRectangle(c->x, c->y - 2, content_width(c), 1, th->sidebar_border);
+    c->y += SP_ROW + 2;
+
+    for (int i = 0; i < al->count; i++) {
+        const Action *a = &al->items[i];
+        bool open = s->page_action_open == i + 1;
+        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
+
+        char where[64];
+        if (show_target) {
+            const char *base = strrchr(a->target, '/');
+            snprintf(where, sizeof(where), "%s %s",
+                     a->scope == ACTION_ROW ? "у записи" : "у таблицы",
+                     base ? base + 1 : a->target);
+        } else {
+            snprintf(where, sizeof(where), "%s",
+                     a->scope == ACTION_ROW ? "у записи" : "у таблицы");
+        }
+        // Имя в кавычках: так видно, что это подпись кнопки, а не поле или
+        // состояние. Плашкой рисовать нельзя — она выглядела бы нажимаемой.
+        char quoted[ACTION_NAME_MAX + 8];
+        snprintf(quoted, sizeof(quoted), "«%s»", a->name);
+        ui_text_clipped(c->font, quoted, c->x, c->y, th->row_text, name_w * cw);
+        ui_text_clipped(c->font, where, col2, c->y, th->row_text_dim, where_w * cw);
+        // Дорога цветом: разговор акцентом — он заговорит с тобой; задача
+        // приглушённо — сделает молча.
+        ui_text_clipped(c->font, a->to_task ? "задача" : "разговор", col3, c->y,
+                        a->to_task ? th->row_text_dim : th->progress_fill, cw * 10);
+        c->y += c->line + SP_ROW;
+
+        if (hover && c->click) set_event(c, PAGE_EVENT_ACTION_TOGGLE, i, NULL);
+        if (!open) continue;
+
+        // Раскрытое — свой блок с линейкой слева: без неё «Удалить» вставало
+        // вплотную к следующей строке и читалось её кнопкой.
+        int block_top = c->y;
+        char what[128];
+        snprintf(what, sizeof(what), "клик отправляет %s:",
+                 a->to_task ? "задачей, молча" : "репликой в разговор");
+        ui_text_clipped(c->font, what, c->x + cw * 2, c->y, th->row_text_dim,
+                        content_width(c) - cw * 2);
+        c->y += c->line;
+        body_text(c, a->text, cw * 2, th->row_text);
+        c->y += SP_ROW;
+        row_begin(c);
+        c->row_x = c->x + cw * 2;
+        if (button_kind(c, "Удалить", BTN_DANGER))
+            set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
+        row_end(c);
+        DrawRectangle(c->x + 3, block_top, 1, c->y - block_top - 6, th->sidebar_border);
+        c->y += SP_ROW;
+    }
+
+    if (al->count == 0)
+        text(c, "кнопок над данными пока нет", th->row_text_dim);
+
+    c->y += SP_ROW;
+    row_begin(c);
+    if (button_kind(c, "+ Новое действие", BTN_QUIET))
+        set_event(c, PAGE_EVENT_ACTIONS_NEW, 0, NULL);
+    row_end(c);
 }
 
 // Скиллы проекта — строкой на скилл: имя, описание из шапки. Клик
@@ -1406,10 +1719,34 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
 
     char title[64];
     snprintf(title, sizeof(title), sl->count ? "Скиллы проекта · %d" : "Скиллы проекта", sl->count);
-    section(c, title);
+    section_help(c, title, NULL,
+                 "Скилл — процедура с условием запуска: агент сам решает по "
+                 "описанию, что она нужна. Живёт в .claude/skills, уезжает с "
+                 "кодом, подпроекты его наследуют. Скиллы берта и личные из "
+                 "~/.claude/skills здесь не показаны — они в настройках (⌘,).");
 
     const int cw = c->font->cell_width;
     int open_idx = s->page_skill_open - 1;
+
+    // Шапка, как у действий и документов: имя и условие запуска — две колонки,
+    // а не имя с описанием впритык.
+    int name_w = 10;
+    for (int i = 0; i < sl->count; i++) {
+        int n = chars_of(sl->items[i].name);
+        if (n > name_w) name_w = n;
+    }
+    if (name_w > 26) name_w = 26;
+    int col2 = c->x + (name_w + 4 + 2) * cw;   // +2 на стрелку слева
+    if (sl->count > 0) {
+        ui_text_clipped(c->font, "скилл", c->x + cw * 2, c->y, c->theme->row_text_dim,
+                        name_w * cw);
+        ui_text_clipped(c->font, "когда применять", col2, c->y, c->theme->row_text_dim,
+                        c->x + content_width(c) - col2);
+        c->y += c->line;
+        DrawRectangle(c->x, c->y - 2, content_width(c), 1, c->theme->sidebar_border);
+        c->y += SP_ROW + 2;
+    }
+
     for (int i = 0; i < sl->count; i++) {
         const Skill *sk = &sl->items[i];
         bool open = open_idx == i;
@@ -1419,19 +1756,18 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
 
         font_draw_codepoint(c->font, open ? 0x25BE : 0x25B8, (float)c->x, (float)c->y,
                             (float)c->font->size, c->theme->row_text_dim);
-        int x = c->x + cw * 2;
-        int nw = ui_text_clipped(c->font, sk->name, x, c->y, c->theme->row_text, cw * 28);
-        x += nw + cw;
+        ui_text_clipped(c->font, sk->name, c->x + cw * 2, c->y, c->theme->row_text,
+                        name_w * cw);
 
         char line_text[SKILL_DESC_MAX + PROJECT_NAME_MAX + 16];
         if (sk->kind == SKILL_INHERITED)
             snprintf(line_text, sizeof(line_text), "от %s · %s", sk->from, sk->desc);
         else
             snprintf(line_text, sizeof(line_text), "%s", sk->desc);
-        ui_text_clipped(c->font, line_text, x, c->y, c->theme->row_text_dim,
-                        c->x + content_width(c) - x);
+        ui_text_clipped(c->font, line_text, col2, c->y, c->theme->row_text_dim,
+                        c->x + content_width(c) - col2);
         if (hover && c->click) set_event(c, PAGE_EVENT_SKILL_TOGGLE, i, sk->name);
-        c->y += c->line;
+        c->y += c->line + SP_ROW;
 
         if (!open) continue;
         int indent = cw * 2;
@@ -1453,17 +1789,12 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
         draw_editor(c, 0);
     } else {
         row_begin(c);
-        if (button(c, "Новый скилл", false))
+        if (button_kind(c, "+ Новый скилл", BTN_QUIET))
             edit_begin_skill(s->cwd);
         row_end(c);
     }
 
-    char foot[600];
-    snprintf(foot, sizeof(foot),
-             "Скилл — процедура с условием запуска: живёт в .claude/skills и уезжает с кодом, "
-             "подпроекты его наследуют. Скиллы берта — в настройках (⌘,)%s",
-             sl->personal_count > 0 ? "; личные из ~/.claude/skills действуют везде." : ".");
-    body_text(c, foot, 0, c->theme->row_text_dim);
+
 }
 
 // Документы проекта — реестр .berth/files.tsv: имя, пояснение, давность.
@@ -1477,86 +1808,99 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
     if (!fl || (!fl->exists && fl->undescribed <= 0)) return;
 
     char title[64];
-    snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы", fl->count);
-    section(c, title);
+    // Число неописанных — в заголовок: свёрнутый список ниже легко
+    // пропустить, а новый файл в проекте как раз и попадает туда.
+    if (fl->undescribed > 0 && fl->count)
+        snprintf(title, sizeof(title), "Документы · %d · %s%d без пояснения",
+                 fl->count, fl->scan_cut ? "не меньше " : "", fl->undescribed);
+    else if (fl->undescribed > 0)
+        snprintf(title, sizeof(title), "Документы · %s%d без пояснения",
+                 fl->scan_cut ? "не меньше " : "", fl->undescribed);
+    else
+        snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы",
+                 fl->count);
+    section_help(c, title, NULL,
+                 "Файлы проекта, сделанные для чтения человеком: документы, "
+                 "таблицы, отчёты, картинки. Пояснения берутся из "
+                 ".berth/files.tsv — их пишет агент по скиллу berth-files; "
+                 "сами файлы берт находит обходом папки.");
 
     const int cw = c->font->cell_width;
-    for (int i = 0; i < fl->count; i++) {
-        const FileEntry *e = &fl->items[i];
-        bool open = s->page_file_open == i + 1;
-        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * (open ? 1 : 2) + 6 };
-        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        int row_top = r.y;
+    const Theme *th = c->theme;
 
-        Color tone = e->exists ? c->theme->row_text : c->theme->row_text_dim;
-        const char *base = strrchr(e->path, '/');
-        base = base ? base + 1 : e->path;
-
-        // Справа давность; у пропавшего файла — пометка вместо неё.
-        char age[32];
-        if (e->exists) projinfo_age(e->mtime, age, sizeof(age));
-        else           snprintf(age, sizeof(age), "нет файла");
-        int age_w = chars_of(age) * cw;
+    // Тем же способом, что действия: шапка и строка на файл. Двухстрочные
+    // записи (имя, под ним пояснение) на широкой колонке тратили место и
+    // читались лесенкой.
+    if (fl->count > 0) {
+        int name_w = 8;
+        for (int i = 0; i < fl->count; i++) {
+            const char *b = strrchr(fl->items[i].path, '/');
+            int n = chars_of(b ? b + 1 : fl->items[i].path);
+            if (n > name_w) name_w = n;
+        }
+        if (name_w > 30) name_w = 30;
+        int age_w = 11;
+        int col2 = c->x + (name_w + 4) * cw;
         int right = c->x + content_width(c);
-        ui_text_clipped(c->font, age, right - age_w, c->y,
-                        e->exists ? c->theme->row_text_dim : c->theme->badge_attention, age_w);
-        right -= age_w;
-        ui_text_clipped(c->font, base, c->x, c->y, tone, right - c->x - cw);
-        c->y += c->line;
+        int note_w = right - age_w * cw - cw * 2 - col2;
 
-        // Свёрнутый — одна строка пояснения, сколько влезет; клик
-        // раскрывает: пояснение целиком, под ним путь и кнопки.
-        if (hover && c->click) set_event(c, PAGE_EVENT_FILE_TOGGLE, i, NULL);
-        if (!open) {
-            ui_text_clipped(c->font, e->note, c->x + cw * 2, c->y, c->theme->row_text_dim,
-                            content_width(c) - cw * 2);
-            c->y += c->line;
-        } else {
-            body_text(c, e->note, cw * 2, c->theme->row_text);
+        ui_text_clipped(c->font, "файл", c->x, c->y, th->row_text_dim, name_w * cw);
+        ui_text_clipped(c->font, "пояснение", col2, c->y, th->row_text_dim, note_w);
+        ui_text_clipped(c->font, "правлен", right - age_w * cw, c->y, th->row_text_dim,
+                        age_w * cw);
+        c->y += c->line;
+        DrawRectangle(c->x, c->y - 2, content_width(c), 1, th->sidebar_border);
+        c->y += SP_ROW + 2;
+
+        for (int i = 0; i < fl->count; i++) {
+            const FileEntry *e = &fl->items[i];
+            bool open = s->page_file_open == i + 1;
+            Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
+            bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+            if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
+            int row_top = r.y;
+
+            const char *base = strrchr(e->path, '/');
+            base = base ? base + 1 : e->path;
+            char age[32];
+            if (e->exists) projinfo_age(e->mtime, age, sizeof(age));
+            else           snprintf(age, sizeof(age), "нет файла");
+
+            ui_text_clipped(c->font, base, c->x, c->y,
+                            e->exists ? th->row_text : th->row_text_dim, name_w * cw);
+            ui_text_clipped(c->font, e->note, col2, c->y, th->row_text_dim, note_w);
+            ui_text_clipped(c->font, age, right - chars_of(age) * cw, c->y,
+                            e->exists ? th->row_text_dim : th->badge_attention,
+                            chars_of(age) * cw);
+            c->y += c->line + SP_ROW;
+
+            if (hover && c->click) set_event(c, PAGE_EVENT_FILE_TOGGLE, i, NULL);
+            if (!open) continue;
+
+            // Раскрытое — блок с линейкой слева, как у действия.
+            int block_top = c->y;
+            body_text(c, e->note, cw * 2, th->row_text);
             if (base != e->path) {
-                gap(c, 1);
-                ui_text_clipped(c->font, e->path, c->x + cw * 2, c->y, c->theme->row_text_dim,
+                ui_text_clipped(c->font, e->path, c->x + cw * 2, c->y, th->row_text_dim,
                                 content_width(c) - cw * 2);
                 c->y += c->line;
             }
-            gap(c, 1);
+            c->y += SP_ROW;
             if (e->exists) {
                 row_begin(c);
                 c->row_x = c->x + cw * 2;
                 if (button(c, "Открыть", true)) set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
                 if (button(c, "Папка", false))  set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
                 row_end(c);
-
-                // Таблицу можно показывать прямо на странице — тогда её не
-                // надо открывать, чтобы вспомнить, что в ней. Мест немного:
-                // страница не витрина файлов, а рабочее место.
-                if (files_is_table(e->path)) {
-                    bool on = files_shown(fl, e->path);
-                    bool room = on || fl->shown_count < FILES_SHOWN_MAX;
-                    row_begin(c);
-                    c->row_x = c->x + cw * 2;
-                    const char *label = "Показывать на странице";
-                    int lw = chars_of(label) * cw;
-                    ui_text_clipped(c->font, label, c->row_x, c->y + 6,
-                                    c->theme->row_text_dim, lw);
-                    c->row_x += lw + cw;
-                    if (room) {
-                        if (toggle(c, on)) set_event(c, PAGE_EVENT_FILE_SHOW, i, NULL);
-                    } else {
-                        ui_text_clipped(c->font, "уже показаны две", c->row_x, c->y + 6,
-                                        c->theme->row_text_dim, cw * 20);
-                    }
-                    row_end(c);
-                }
             } else {
-                text(c, "файла на месте нет — строку реестра пора убрать", c->theme->row_text_dim);
+                text(c, "файла на месте нет — строку реестра пора убрать", th->row_text_dim);
             }
+            DrawRectangle(c->x + 3, block_top, 1, c->y - block_top - 6, th->sidebar_border);
             reveal_task_once(c, s->cwd, -3, i, row_top);
+            c->y += SP_ROW;
         }
-        gap(c, 0);
-        c->y += 4;
     }
+
     if (fl->count == 0 && fl->exists)
         text(c, "Реестр пуст", c->theme->row_text_dim);
     if (fl->partial)
@@ -1610,7 +1954,7 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
             if (hover && c->click)
                 set_event(c, describe_hit ? PAGE_EVENT_DESCRIBE_FILE : PAGE_EVENT_UFILE_OPEN,
                           i, NULL);
-            c->y += c->line + 4;
+            c->y += c->line + SP_ROW;
         }
         if (fl->undescribed > fl->undesc_count) {
             char more[64];
@@ -1690,6 +2034,58 @@ static struct {
     float grab_dx, grab_dy;
 } g_chip;
 
+// Ряд кнопок-действий для этой таблицы. Действие без вопросов уходит сразу,
+// с вопросами открывает форму. Подстановки берутся из записи (row < 0 —
+// действие над таблицей целиком, тогда подставлять нечего).
+static void draw_editor(Ctx *c, int indent);
+
+// Открыта ли форма действия для этой записи (-1 — для таблицы целиком).
+static bool action_form_here(const Session *s, int row)
+{
+    return g_edit.active && g_edit.action && g_edit.index == row
+        && !strcmp(g_edit.cwd, s->cwd);
+}
+
+static int actions_count(const ActionList *al, const Table *t, ActionScope scope)
+{
+    int n = 0;
+    for (int i = 0; i < al->count; i++)
+        if (al->items[i].scope == scope && !strcmp(al->items[i].target, t->path)) n++;
+    return n;
+}
+
+// Кнопки действий в **уже открытый** ряд: рядом с ними стоят свои кнопки
+// раздела, и собственный ряд разводил бы их ступеньками по вертикали.
+// Ряд и форму открывает вызывающий — он знает, где им место.
+static void actions_buttons(Ctx *c, const Session *s, const ActionList *al,
+                            const Table *t, int row, ActionScope scope)
+{
+    for (int i = 0; i < al->count; i++) {
+        const Action *a = &al->items[i];
+        if (a->scope != scope || strcmp(a->target, t->path)) continue;
+        if (!button(c, a->name, !a->to_task)) continue;
+
+        const char *names[TABLE_COLS_MAX], *vals[TABLE_COLS_MAX];
+        int n = 0;
+        if (row >= 0)
+            for (int k = 0; k < t->col_count; k++) {
+                names[n] = t->cols[k];
+                vals[n] = t->cells[row][k];
+                n++;
+            }
+        static char tmpl[ACTION_TEXT_MAX * 2];
+        char ask[ACTION_ASK_MAX][ACTION_LABEL_MAX];
+        int asked = action_expand(a->text, names, vals, n, tmpl, sizeof(tmpl),
+                                  ask, ACTION_ASK_MAX);
+        if (asked > 0) {
+            edit_begin_action(s->cwd, i, row, tmpl, ask, asked);
+        } else {
+            set_event(c, PAGE_EVENT_ACTION_RUN, i, NULL);
+            c->event.prompt = tmpl;
+        }
+    }
+}
+
 static const Table *g_sort_table;
 static int  g_sort_col;
 static bool g_sort_desc;
@@ -1719,7 +2115,8 @@ static int cmp_rows(const void *pa, const void *pb)
     return g_sort_desc ? -r : r;
 }
 
-static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
+static void draw_table(Ctx *c, const Session *s, const ActionList *al,
+                       const Table *t, int idx)
 {
     const int cw = c->font->cell_width;
     const Theme *th = c->theme;
@@ -1944,7 +2341,7 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
         // Раскрытая запись — все колонки, включая отброшенные справа: ради
         // них клик и нужен.
         if (open) {
-            gap(c, 0);
+            c->y += SP_ROW;
             for (int i = 0; i < t->col_count; i++) {
                 if (!t->cells[r][i][0]) continue;
                 char line_text[TABLE_CELL_MAX * 2];
@@ -1955,30 +2352,48 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
                                 th->row_text, content_width(c) - cw * 2 - lw);
                 c->y += c->line;
             }
+            if (actions_count(al, t, ACTION_ROW) > 0) {
+                row_begin(c);
+                c->row_x = c->x + cw * 2;
+                actions_buttons(c, s, al, t, r, ACTION_ROW);
+                row_end(c);
+            }
+            if (action_form_here(s, r)) draw_editor(c, cw * 2);
             reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
             gap(c, 1);
         }
     }
 
-    if (t->row_count > limit || t->file_rows > t->row_count) {
-        gap(c, 1);
-        char more[96];
-        if (t->row_count > limit)
-            snprintf(more, sizeof(more), "Показать все · %d", t->row_count);
+    // Показ записей — не действие, а вид: складная строка под последней
+    // записью, как «Сделано · N» у задач и дни в журнале. Кнопкой рядом с
+    // «Подобрать» она читалась бы как такая же команда над данными.
+    if (t->row_count > 8) {
+        char head[80];
+        if (all)
+            snprintf(head, sizeof(head), "Свернуть до восьми");
         else
-            snprintf(more, sizeof(more), "В файле ещё %d — на странице первые %d",
-                     t->file_rows - t->row_count, t->row_count);
-        if (t->row_count > limit) {
-            row_begin(c);
-            if (button(c, more, false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
-            row_end(c);
-        } else {
-            text(c, more, th->row_text_dim);
-        }
-    } else if (all && t->row_count > 8) {
-        row_begin(c);
-        if (button(c, "Свернуть", false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
-        row_end(c);
+            snprintf(head, sizeof(head), "Ещё %d %s", t->row_count - limit,
+                     plural3(t->row_count - limit, "запись", "записи", "записей"));
+        if (fold_row(c, head, NULL, all, th->row_text_dim))
+            set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+    }
+
+    // Действия — это уже про данные, поэтому своим рядом и кнопками. Тут же
+    // «+ Кнопка»: какой таблице заводить действие, человек показывает
+    // местом клика, а не полем в форме.
+    gap(c, 1);
+    row_begin(c);
+    actions_buttons(c, s, al, t, -1, ACTION_TABLE);
+    if (button_kind(c, "+ Кнопка", BTN_QUIET))
+        set_event(c, PAGE_EVENT_ACTION_NEW_FOR, idx, NULL);
+    row_end(c);
+    if (action_form_here(s, -1)) draw_editor(c, 0);
+
+    if (t->file_rows > t->row_count) {
+        char note[96];
+        snprintf(note, sizeof(note), "В файле ещё %d — на странице первые %d",
+                 t->file_rows - t->row_count, t->row_count);
+        text(c, note, th->row_text_dim);
     }
 
     // Что не влезло в ширину, из списка выпало молча — об этом надо сказать,
@@ -2372,7 +2787,7 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     // таблице нужна ширина, а справа она встала бы в 2/5 экрана и
     // растеряла бы колонки.
     for (int i = 0; i < st->table_count; i++)
-        draw_table(&c, s, &st->tables[i], i);
+        draw_table(&c, s, &st->actions, &st->tables[i], i);
 
     draw_journal(&c, s, &st->journal, info);
 
@@ -2407,8 +2822,9 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     // перед оснасткой.
     draw_files(&c, s, &st->files);
 
-    // Скиллы — последними: это оснастка проекта, к ней ходят реже, чем к
-    // задачам.
+    // Действия и скиллы — оснастка проекта, последними: к ним ходят реже,
+    // чем к задачам.
+    draw_actions_section(&c, s, &st->actions, st->table_count);
     draw_skills(&c, s, projects);
 
     if (wide) {
@@ -2422,6 +2838,9 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
         c.col_w = full;
         c.y = end;
     }
+
+    // Балун — последним: всё, что нарисовано после него, его бы перекрыло.
+    draw_tip(&c);
 
     revealed_end();
     c.event.scroll_top = c.scroll_top;

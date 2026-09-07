@@ -19,6 +19,7 @@
 #include "skills.h"
 #include "files.h"
 #include "table.h"
+#include "actions.h"
 
 typedef struct {
     char     cwd[512];
@@ -31,6 +32,7 @@ typedef struct {
     // mtime тем же опросом, что задачи и реестр.
     Table    tables[FILES_SHOWN_MAX];
     int      table_count;
+    ActionList actions;   // кнопки над данными, .berth/actions.tsv
     time_t   touched;   // когда набор последний раз спрашивали
     time_t   journal_mtime;   // .berth/journal.md на момент чтения ленты
 } ProjectState;

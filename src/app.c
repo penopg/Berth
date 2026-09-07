@@ -1061,6 +1061,124 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_table_all ^= 1u << ev.arg;
         break;
 
+    // Действие над данными: реплика уже собрана страницей — подстановки
+    // из записи и ответы формы. Берту остаётся выбрать дорогу.
+    case PAGE_EVENT_ACTION_RUN: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->actions.count || !ev.prompt) break;
+        const Action *a = &st->actions.items[ev.arg];
+
+        if (!a->to_task) {
+            // Результат в ответе — реплика в разговор проекта, и уводим в
+            // терминал: человек задал вопрос и ждёт ответа.
+            say_to_conversation(app, s, s->cwd, ev.prompt, cols, rows);
+            int main = session_of_project(&app->sessions, s->cwd);
+            if (main >= 0) {
+                session_activate(&app->sessions, main);
+                resize_all(app);
+            }
+            break;
+        }
+
+        // Результат в файле — вкладка-задача на простой модели, молча.
+        // Текст идёт через файл: в командной строке ему делать нечего —
+        // кавычки, апострофы, «ёлочки».
+        char path[PROJECT_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/prompt.txt", config_dir());
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "Не удалось записать %s", path);
+            break;
+        }
+        fputs(ev.prompt, f);
+        fclose(f);
+
+        int was = app->sessions.active;
+        char cmd[PROJECT_PATH_MAX + 600];
+        snprintf(cmd, sizeof(cmd),
+                 "claude -p \"$(cat '%s')\" --verbose --no-session-persistence%s "
+                 "--permission-mode acceptEdits "
+                 "--allowed-tools \"Bash(awk *)\" \"Bash(sort *)\" \"Bash(head *)\" "
+                 "Read Glob Grep Edit Write WebSearch WebFetch",
+                 path, task_model_flag(app));
+        int tab = open_task(app, s->project, s->cwd, a->name, cmd);
+        if (tab >= 0) {
+            session_activate(&app->sessions, was);
+            resize_all(app);
+            save_layout(app);
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "«%s» — задача пошла, видна в панели", a->name);
+        } else {
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
+        }
+        break;
+    }
+
+    case PAGE_EVENT_ACTION_TOGGLE:
+        s->page_action_open = (s->page_action_open == ev.arg + 1) ? 0 : ev.arg + 1;
+        break;
+
+    case PAGE_EVENT_ACTION_REMOVE: {
+        ProjectState *st = projstate_edit(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->actions.count) break;
+        char name[ACTION_NAME_MAX];
+        snprintf(name, sizeof(name), "%s", st->actions.items[ev.arg].name);
+        bool ok = actions_remove(&st->actions, s->cwd, ev.arg);
+        s->page_action_open = 0;
+        snprintf(s->page_notice, sizeof(s->page_notice),
+                 ok ? "«%s» убрана" : "«%s» убрать не вышло", name);
+        break;
+    }
+
+    case PAGE_EVENT_ACTIONS_EDIT: {
+        char target[PROJECT_PATH_MAX + 64];
+        snprintf(target, sizeof(target), "%s/%s", s->cwd, ACTIONS_FILE);
+        open_with(target, "-t");
+        break;
+    }
+
+    // Кнопку заводит агент: текст действия — это промпт, и сочинять его
+    // ему сподручнее, чем человеку через поля ввода. Берт лишь начинает
+    // разговор с нужной просьбы.
+    case PAGE_EVENT_ACTIONS_NEW:
+    case PAGE_EVENT_ACTION_NEW_FOR: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        char prompt[900];
+        if (ev.kind == PAGE_EVENT_ACTION_NEW_FOR && st
+            && ev.arg >= 0 && ev.arg < st->table_count) {
+            // Таблицу человек уже показал — тем, что нажал «+ Кнопка» под
+            // ней. Спрашивать «над какой?» после этого было бы глухотой.
+            snprintf(prompt, sizeof(prompt),
+                     "По скиллу berth-actions заведи кнопку над таблицей %s. "
+                     "Спроси, что она должна делать и куда девать результат "
+                     "(правка в файл — задачей, ответ — в разговор), и допиши "
+                     "строку в .berth/actions.tsv.", st->tables[ev.arg].path);
+        } else if (st && st->table_count > 0) {
+            // Таблиц может быть несколько, и кнопка привязывается к одной:
+            // перечисляем их, чтобы агент спросил по делу, а не гадал.
+            char list[400] = "";
+            for (int i = 0; i < st->table_count; i++)
+                snprintf(list + strlen(list), sizeof(list) - strlen(list), "%s%s",
+                         i ? ", " : "", st->tables[i].path);
+            snprintf(prompt, sizeof(prompt),
+                     "По скиллу berth-actions заведи кнопку над данными проекта. "
+                     "На странице показаны таблицы: %s. Спроси, к какой из них "
+                     "кнопка, что она должна делать и куда девать результат, и "
+                     "допиши строку в .berth/actions.tsv.", list);
+        } else {
+            snprintf(prompt, sizeof(prompt),
+                     "По скиллу berth-actions заведи кнопку над данными проекта: "
+                     "спроси, над какой таблицей, что она должна делать и куда "
+                     "девать результат, и допиши строку в .berth/actions.tsv.");
+        }
+        say_to_conversation(app, s, s->cwd, prompt, cols, rows);
+        int main = session_of_project(&app->sessions, s->cwd);
+        if (main >= 0) { session_activate(&app->sessions, main); resize_all(app); }
+        break;
+    }
+
     case PAGE_EVENT_TWO_COLUMNS:
         app->settings.page_two_columns = !app->settings.page_two_columns;
         save_settings(app);
@@ -2086,6 +2204,22 @@ int main(int argc, char **argv)
         PageEvent page_event = { 0 };
 
         scene_tick(&app, GetFrameTime());
+
+        // BERTH_FPS=1 — раз в секунду печатает, во что обходится кадр:
+        // среднее, худшее и сколько кадров успели. Нужно, когда «кажется,
+        // что просело»: без числа это спор о вкусах.
+        if (getenv("BERTH_FPS")) {
+            static double win_start; static int win_frames; static double win_worst;
+            double now = GetTime(), dt = GetFrameTime();
+            if (dt > win_worst) win_worst = dt;
+            win_frames++;
+            if (now - win_start >= 1.0) {
+                fprintf(stderr, "[fps] %d кадров, среднее %.2f мс, худший %.2f мс\n",
+                        win_frames, (now - win_start) * 1000.0 / win_frames,
+                        win_worst * 1000.0);
+                win_start = now; win_frames = 0; win_worst = 0;
+            }
+        }
 
         BeginDrawing();
         ClearBackground(app.theme.sidebar_bg);
