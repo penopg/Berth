@@ -72,6 +72,7 @@ typedef enum {
     PAGE_EVENT_ACTION_TOGGLE,    // раскрыть действие в разделе «Действия»
     PAGE_EVENT_ACTIONS_EDIT,     // открыть .berth/actions.tsv в редакторе
     PAGE_EVENT_ACTIONS_NEW,      // попросить агента завести кнопку
+    PAGE_EVENT_ACTION_NEW_FOR,   // …над таблицей arg: контекст выбран местом
     PAGE_EVENT_ACTION_REMOVE,    // убрать действие arg из файла
     PAGE_EVENT_TWO_COLUMNS,      // сложить страницу в одну колонку и обратно
     PAGE_EVENT_TABLE_CFG,        // открыть или закрыть настройку колонок

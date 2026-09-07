@@ -1142,20 +1142,37 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
     // Кнопку заводит агент: текст действия — это промпт, и сочинять его
     // ему сподручнее, чем человеку через поля ввода. Берт лишь начинает
     // разговор с нужной просьбы.
-    case PAGE_EVENT_ACTIONS_NEW: {
+    case PAGE_EVENT_ACTIONS_NEW:
+    case PAGE_EVENT_ACTION_NEW_FOR: {
         const ProjectState *st = projstate_peek(s->cwd);
-        char prompt[600];
-        if (st && st->table_count > 0)
+        char prompt[900];
+        if (ev.kind == PAGE_EVENT_ACTION_NEW_FOR && st
+            && ev.arg >= 0 && ev.arg < st->table_count) {
+            // Таблицу человек уже показал — тем, что нажал «+ Кнопка» под
+            // ней. Спрашивать «над какой?» после этого было бы глухотой.
+            snprintf(prompt, sizeof(prompt),
+                     "По скиллу berth-actions заведи кнопку над таблицей %s. "
+                     "Спроси, что она должна делать и куда девать результат "
+                     "(правка в файл — задачей, ответ — в разговор), и допиши "
+                     "строку в .berth/actions.tsv.", st->tables[ev.arg].path);
+        } else if (st && st->table_count > 0) {
+            // Таблиц может быть несколько, и кнопка привязывается к одной:
+            // перечисляем их, чтобы агент спросил по делу, а не гадал.
+            char list[400] = "";
+            for (int i = 0; i < st->table_count; i++)
+                snprintf(list + strlen(list), sizeof(list) - strlen(list), "%s%s",
+                         i ? ", " : "", st->tables[i].path);
             snprintf(prompt, sizeof(prompt),
                      "По скиллу berth-actions заведи кнопку над данными проекта. "
-                     "На странице показана таблица %s. Спроси, что она должна "
-                     "делать, к чему прикрепить и куда девать результат, и допиши "
-                     "строку в .berth/actions.tsv.", st->tables[0].path);
-        else
+                     "На странице показаны таблицы: %s. Спроси, к какой из них "
+                     "кнопка, что она должна делать и куда девать результат, и "
+                     "допиши строку в .berth/actions.tsv.", list);
+        } else {
             snprintf(prompt, sizeof(prompt),
                      "По скиллу berth-actions заведи кнопку над данными проекта: "
                      "спроси, над какой таблицей, что она должна делать и куда "
                      "девать результат, и допиши строку в .berth/actions.tsv.");
+        }
         say_to_conversation(app, s, s->cwd, prompt, cols, rows);
         int main = session_of_project(&app->sessions, s->cwd);
         if (main >= 0) { session_activate(&app->sessions, main); resize_all(app); }

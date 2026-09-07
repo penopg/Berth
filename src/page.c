@@ -1579,6 +1579,19 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
 
     const int cw = c->font->cell_width;
     const Theme *th = c->theme;
+
+    // Имя таблицы в строке нужно, как только целей больше одной: кнопка
+    // привязана к файлу, и «у записи» без имени тогда не отвечает на «где».
+    // При одной таблице имя в каждой строке — повтор.
+    int targets = 0;
+    for (int i = 0; i < al->count; i++) {
+        bool seen = false;
+        for (int k = 0; k < i; k++)
+            if (!strcmp(al->items[k].target, al->items[i].target)) seen = true;
+        if (!seen) targets++;
+    }
+    bool show_target = targets > 1 || tables > 1;
+
     char head[64];
     snprintf(head, sizeof(head), al->count ? "Действия · %d" : "Действия", al->count);
     if (section_help(c, head, al->exists ? "Править файл" : NULL,
@@ -1599,7 +1612,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
         if (n > name_w) name_w = n;
     }
     if (name_w > 26) name_w = 26;
-    int where_w = tables > 1 ? 22 : 10;
+    int where_w = show_target ? 26 : 10;
     // Колонки разводим на четыре знакоместа: на двух слова смыкались.
     int col2 = c->x + (name_w + 4) * cw;
     int col3 = col2 + (where_w + 4) * cw;
@@ -1619,7 +1632,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
 
         char where[64];
-        if (tables > 1) {
+        if (show_target) {
             const char *base = strrchr(a->target, '/');
             snprintf(where, sizeof(where), "%s %s",
                      a->scope == ACTION_ROW ? "у записи" : "у таблицы",
@@ -2345,13 +2358,15 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
             set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
     }
 
-    // Действия — это уже про данные, поэтому своим рядом и кнопками.
-    if (actions_count(al, t, ACTION_TABLE) > 0) {
-        gap(c, 1);
-        row_begin(c);
-        actions_buttons(c, s, al, t, -1, ACTION_TABLE);
-        row_end(c);
-    }
+    // Действия — это уже про данные, поэтому своим рядом и кнопками. Тут же
+    // «+ Кнопка»: какой таблице заводить действие, человек показывает
+    // местом клика, а не полем в форме.
+    gap(c, 1);
+    row_begin(c);
+    actions_buttons(c, s, al, t, -1, ACTION_TABLE);
+    if (button_kind(c, "+ Кнопка", BTN_QUIET))
+        set_event(c, PAGE_EVENT_ACTION_NEW_FOR, idx, NULL);
+    row_end(c);
     if (action_form_here(s, -1)) draw_editor(c, 0);
 
     if (t->file_rows > t->row_count) {
