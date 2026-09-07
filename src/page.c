@@ -116,16 +116,63 @@ static void gap(Ctx *c, int lines)
     c->y += c->line * lines / 2;
 }
 
-// Заголовок раздела: приглушённый, с тонкой чертой под ним. Разделы на
-// странице различаются глазом, а не отступом.
+// Шкала отступов. Кегль на странице один — второй означал бы второй атлас, —
+// поэтому расстояния и есть та иерархия, которую в вёрстке обычно несёт
+// размер шрифта. Правило: заголовок ближе к своему содержимому, чем к
+// чужому. Раньше эти числа стояли по месту, и разделы читались сплошняком.
+enum {
+    SP_SECTION = 22,   // перед заголовком раздела — самый большой отступ
+    SP_HEAD    = 6,    // от черты заголовка до первой строки
+    SP_ROW     = 4,    // между строками списка
+    SP_BLOCK   = 10,   // между строкой и её раскрытым содержимым
+};
+
+static bool inside(Rect r, Vector2 m);
+static bool visible_hit(const Ctx *c, Vector2 p);
+
+// Заголовок раздела с необязательными действиями у правого края; возвращает
+// номер нажатого (1..n) или 0. Имя раздела — полным цветом, всё после « · »
+// приглушённо: счёт и время это мета, а не заголовок. До этого заголовок
+// целиком был приглушённым и оказывался бледнее собственного содержимого —
+// иерархия читалась наоборот.
+static int section_head(Ctx *c, const char *title, const char *const *acts, int n)
+{
+    c->y += SP_SECTION;
+    int w = content_width(c);
+    int hit = 0;
+    int right = c->x + w;
+    for (int i = 0; i < n; i++) {
+        if (!acts[i]) continue;
+        int aw = chars_of(acts[i]) * c->font->cell_width;
+        Rect r = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
+        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+        ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
+                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
+        if (hover && c->click) hit = i + 1;
+        right = r.x - 8;
+    }
+
+    int room = right - c->x - 8;
+    const char *meta = strstr(title, " · ");
+    if (meta) {
+        char head[96];
+        snprintf(head, sizeof(head), "%.*s", (int)(meta - title), title);
+        int hw = ui_text_clipped(c->font, head, c->x, c->y, c->theme->row_text, room);
+        ui_text_clipped(c->font, meta, c->x + hw, c->y, c->theme->row_text_dim,
+                        room - hw);
+    } else {
+        ui_text_clipped(c->font, title, c->x, c->y, c->theme->row_text, room);
+    }
+    c->y += c->line;
+    DrawRectangle(c->x, c->y - 3, w, 1, c->theme->sidebar_border);
+    c->y += SP_HEAD;
+    return hit;
+}
+
 static void section(Ctx *c, const char *title)
 {
-    gap(c, 2);
-    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label,
-                    content_width(c));
-    c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, content_width(c), 1, c->theme->sidebar_border);
-    gap(c, 1);
+    section_head(c, title, NULL, 0);
 }
 
 static bool inside(Rect r, Vector2 m);
@@ -177,7 +224,13 @@ static void row_end(Ctx *c)
     c->y += c->line + 10;
 }
 
-static bool button(Ctx *c, const char *label, bool accent)
+// Три веса кнопки. Главная — заливка с акцентной чертой; обычная — заливка,
+// приглушённый текст; тихая — без заливки, только слово, и подсвечивается под
+// курсором. Разрушительная — тихая, но краснеет: одинаковые плашки у «Убрать»
+// и «Новое действие» читались как один ряд равноправных команд.
+typedef enum { BTN_PLAIN, BTN_ACCENT, BTN_QUIET, BTN_DANGER } ButtonKind;
+
+static bool button_kind(Ctx *c, const char *label, ButtonKind kind)
 {
     int chars = chars_of(label);
 
@@ -199,17 +252,27 @@ static bool button(Ctx *c, const char *label, bool accent)
     c->row_used = true;
 
     bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-    Color bg = hover ? c->theme->row_hover_bg : c->theme->row_active_bg;
-    DrawRectangle(r.x, r.y, r.w, r.h, bg);
-    if (accent)
+    bool quiet = kind == BTN_QUIET || kind == BTN_DANGER;
+    if (!quiet || hover) {
+        Color bg = hover ? c->theme->row_hover_bg : c->theme->row_active_bg;
+        DrawRectangle(r.x, r.y, r.w, r.h, bg);
+    }
+    if (kind == BTN_ACCENT)
         DrawRectangle(r.x, r.y, 3, r.h, c->theme->progress_fill);
 
-    ui_text_clipped(c->font, label, r.x + 12, r.y + 6,
-                    accent ? c->theme->row_text : c->theme->row_text_dim,
-                    r.w - 20);
+    Color fg = c->theme->row_text_dim;
+    if (kind == BTN_ACCENT) fg = c->theme->row_text;
+    if (kind == BTN_DANGER && hover) fg = c->theme->badge_dead;
+    if (kind == BTN_QUIET && hover) fg = c->theme->row_text;
+    ui_text_clipped(c->font, label, r.x + 12, r.y + 6, fg, r.w - 20);
 
     c->row_x = r.x + r.w + 8;
     return hover && c->click;
+}
+
+static bool button(Ctx *c, const char *label, bool accent)
+{
+    return button_kind(c, label, accent ? BTN_ACCENT : BTN_PLAIN);
 }
 
 // Кликабельная строка во всю ширину — для списка сессий.
@@ -226,55 +289,20 @@ static bool visible_hit(const Ctx *c, Vector2 p)
 // Действие живёт рядом с тем, на что действует, а не в общем ряду кнопок
 // сверху, где «Обновить сводку» и «Собрать журнал» стояли без контекста.
 // Возвращает true, если по действию нажали.
-// Заголовок с двумя действиями: возвращает 1 или 2 по нажатому. Второе
-// действие стоит левее первого — порядок чтения тот же, что порядок слов.
+// Заголовок с двумя действиями: второе стоит левее первого — порядок чтения
+// тот же, что порядок слов.
 static int section_action2(Ctx *c, const char *title, const char *a1, const char *a2)
 {
-    gap(c, 2);
-    int w = content_width(c);
-    int hit = 0;
-    int right = c->x + w;
     const char *acts[2] = { a1, a2 };
-    for (int i = 0; i < 2; i++) {
-        if (!acts[i]) continue;
-        int aw = chars_of(acts[i]) * c->font->cell_width;
-        Rect r = { right - aw - 8, c->y - 3, aw + 16, c->line + 2 };
-        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
-                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
-        if (hover && c->click) hit = i + 1;
-        right = r.x - 8;
-    }
-    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label,
-                    right - c->x - 8);
-    c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, content_width(c), 1, c->theme->sidebar_border);
-    gap(c, 1);
-    return hit;
+    return section_head(c, title, acts, 2);
 }
 
+// Заголовок с действием у правого края: «Сводка … Обновить». Действие живёт
+// рядом с тем, на что действует, а не в общем ряду кнопок сверху.
 static bool section_action(Ctx *c, const char *title, const char *action)
 {
-    gap(c, 2);
-    int w = content_width(c);
-    bool hit = false;
-    int title_w = w;
-    if (action) {
-        int aw = chars_of(action) * c->font->cell_width;
-        Rect r = { c->x + w - aw - 8, c->y - 3, aw + 16, c->line + 2 };
-        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        ui_text_clipped(c->font, action, r.x + 8, c->y,
-                        hover ? c->theme->row_text : c->theme->row_text_dim, aw);
-        hit = hover && c->click;
-        title_w = w - aw - 24;
-    }
-    ui_text_clipped(c->font, title, c->x, c->y, c->theme->group_label, title_w);
-    c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, w, 1, c->theme->sidebar_border);
-    gap(c, 1);
-    return hit;
+    const char *acts[1] = { action };
+    return section_head(c, title, acts, 1) == 1;
 }
 
 // Складная строка внутри раздела: стрелка ▸/▾, заголовок и приглушённая
@@ -1471,9 +1499,10 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
     if (al->count == 0 && tables == 0) return;
 
     const int cw = c->font->cell_width;
+    const Theme *th = c->theme;
     char head[64];
     snprintf(head, sizeof(head), al->count ? "Действия · %d" : "Действия", al->count);
-    if (section_action(c, head, al->exists ? "Править" : NULL))
+    if (section_action(c, head, al->exists ? "Править файл" : NULL))
         set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
 
     for (int i = 0; i < al->count; i++) {
@@ -1481,46 +1510,52 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
         bool open = s->page_action_open == i + 1;
         Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * 2 + 6 };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
 
-        // Справа — где кнопка стоит и куда уходит: по этим двум словам
-        // действие узнаётся, не читая текста.
-        const char *base = strrchr(a->target, '/');
-        base = base ? base + 1 : a->target;
-        char where[96];
-        snprintf(where, sizeof(where), "%s · %s · %s",
-                 a->scope == ACTION_ROW ? "запись" : "таблица", base,
-                 a->to_task ? "задача" : "разговор");
-        int ww = chars_of(where) * cw;
+        // Справа — где кнопка стоит и куда уходит. Дорога цветом: разговор
+        // акцентом (он заговорит с тобой), задача приглушённо (сделает молча).
+        // Имя таблицы показываем, только когда их больше одной: у одной оно в
+        // каждой строке — шум.
+        const char *where = a->scope == ACTION_ROW ? "запись" : "таблица";
+        const char *road = a->to_task ? "задача" : "разговор";
+        char meta[96];
+        if (tables > 1) {
+            const char *base = strrchr(a->target, '/');
+            snprintf(meta, sizeof(meta), "%s · %s · ", where, base ? base + 1 : a->target);
+        } else {
+            snprintf(meta, sizeof(meta), "%s · ", where);
+        }
+        int rw = (chars_of(meta) + chars_of(road)) * cw;
         int right = c->x + content_width(c);
-        ui_text_clipped(c->font, where, right - ww, c->y, c->theme->row_text_dim, ww);
-        ui_text_clipped(c->font, a->name, c->x, c->y, c->theme->row_text,
-                        right - ww - c->x - cw);
+        int mw = ui_text_clipped(c->font, meta, right - rw, c->y, th->row_text_dim, rw);
+        ui_text_clipped(c->font, road, right - rw + mw, c->y,
+                        a->to_task ? th->row_text_dim : th->progress_fill, rw - mw);
+        ui_text_clipped(c->font, a->name, c->x, c->y, th->row_text,
+                        right - rw - c->x - cw);
         c->y += c->line;
 
         if (hover && c->click) set_event(c, PAGE_EVENT_ACTION_TOGGLE, i, NULL);
         if (open) {
-            body_text(c, a->text, cw * 2, c->theme->row_text);
-            gap(c, 1);
+            body_text(c, a->text, cw * 2, th->row_text);
+            c->y += SP_BLOCK;
             row_begin(c);
             c->row_x = c->x + cw * 2;
-            if (button(c, "Убрать", false))
+            if (button_kind(c, "Удалить", BTN_DANGER))
                 set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
             row_end(c);
         } else {
             ui_text_clipped(c->font, a->text, c->x + cw * 2, c->y,
-                            c->theme->row_text_dim, content_width(c) - cw * 2);
-            c->y += c->line;
+                            th->row_text_dim, content_width(c) - cw * 2);
+            c->y += c->line + SP_ROW;
         }
-        gap(c, 0);
-        c->y += 4;
     }
 
     if (al->count == 0)
-        text(c, "кнопок над данными пока нет", c->theme->row_text_dim);
+        text(c, "кнопок над данными пока нет", th->row_text_dim);
 
+    c->y += SP_ROW;
     row_begin(c);
-    if (button(c, "Завести кнопку", false))
+    if (button_kind(c, "Новое действие", BTN_PLAIN))
         set_event(c, PAGE_EVENT_ACTIONS_NEW, 0, NULL);
     row_end(c);
 }
@@ -1686,8 +1721,7 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
             }
             reveal_task_once(c, s->cwd, -3, i, row_top);
         }
-        gap(c, 0);
-        c->y += 4;
+        c->y += SP_ROW;
     }
     if (fl->count == 0 && fl->exists)
         text(c, "Реестр пуст", c->theme->row_text_dim);
@@ -1742,7 +1776,7 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
             if (hover && c->click)
                 set_event(c, describe_hit ? PAGE_EVENT_DESCRIBE_FILE : PAGE_EVENT_UFILE_OPEN,
                           i, NULL);
-            c->y += c->line + 4;
+            c->y += c->line + SP_ROW;
         }
         if (fl->undescribed > fl->undesc_count) {
             char more[64];
@@ -2129,7 +2163,7 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
         // Раскрытая запись — все колонки, включая отброшенные справа: ради
         // них клик и нужен.
         if (open) {
-            gap(c, 0);
+            c->y += SP_ROW;
             for (int i = 0; i < t->col_count; i++) {
                 if (!t->cells[r][i][0]) continue;
                 char line_text[TABLE_CELL_MAX * 2];
