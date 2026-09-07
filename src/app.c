@@ -991,6 +991,10 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_skill_open = (s->page_skill_open == ev.arg + 1) ? 0 : ev.arg + 1;
         break;
 
+    case PAGE_EVENT_FILE_TOGGLE:
+        s->page_file_open = (s->page_file_open == ev.arg + 1) ? 0 : ev.arg + 1;
+        break;
+
     case PAGE_EVENT_FILE_OPEN:
     case PAGE_EVENT_FILE_REVEAL: {
         const ProjectState *st = projstate_peek(s->cwd);

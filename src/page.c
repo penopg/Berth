@@ -1425,15 +1425,17 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
     const int cw = c->font->cell_width;
     for (int i = 0; i < fl->count; i++) {
         const FileEntry *e = &fl->items[i];
-        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * 2 + 6 };
+        bool open = s->page_file_open == i + 1;
+        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * (open ? 1 : 2) + 6 };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+        int row_top = r.y;
 
         Color tone = e->exists ? c->theme->row_text : c->theme->row_text_dim;
         const char *base = strrchr(e->path, '/');
         base = base ? base + 1 : e->path;
 
-        // Справа: давность, а под курсором перед ней — «Папка».
+        // Справа давность; у пропавшего файла — пометка вместо неё.
         char age[32];
         if (e->exists) projinfo_age(e->mtime, age, sizeof(age));
         else           snprintf(age, sizeof(age), "нет файла");
@@ -1441,29 +1443,36 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
         int right = c->x + content_width(c);
         ui_text_clipped(c->font, age, right - age_w, c->y,
                         e->exists ? c->theme->row_text_dim : c->theme->badge_attention, age_w);
-        bool reveal_hit = false;
-        if (hover && e->exists) {
-            const char *act = "Папка";
-            int aw = chars_of(act) * cw;
-            Rect ar = { right - age_w - aw - cw * 2 - 8, c->y - 3, aw + 16, c->line + 2 };
-            bool ah = inside(ar, c->mouse);
-            if (ah) DrawRectangle(ar.x, ar.y, ar.w, ar.h, c->theme->sidebar_border);
-            ui_text_clipped(c->font, act, ar.x + 8, c->y,
-                            ah ? c->theme->row_text : c->theme->row_text_dim, aw);
-            reveal_hit = ah;
-            right = ar.x;
-        } else {
-            right -= age_w;
-        }
+        right -= age_w;
         ui_text_clipped(c->font, base, c->x, c->y, tone, right - c->x - cw);
         c->y += c->line;
-        ui_text_clipped(c->font, e->note, c->x + cw * 2, c->y, c->theme->row_text_dim,
-                        content_width(c) - cw * 2);
-        c->y += c->line;
 
-        if (hover && c->click) {
-            if (reveal_hit)      set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
-            else if (e->exists)  set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
+        // Свёрнутый — одна строка пояснения, сколько влезет; клик
+        // раскрывает: пояснение целиком, под ним путь и кнопки.
+        if (hover && c->click) set_event(c, PAGE_EVENT_FILE_TOGGLE, i, NULL);
+        if (!open) {
+            ui_text_clipped(c->font, e->note, c->x + cw * 2, c->y, c->theme->row_text_dim,
+                            content_width(c) - cw * 2);
+            c->y += c->line;
+        } else {
+            body_text(c, e->note, cw * 2, c->theme->row_text);
+            if (base != e->path) {
+                gap(c, 1);
+                ui_text_clipped(c->font, e->path, c->x + cw * 2, c->y, c->theme->row_text_dim,
+                                content_width(c) - cw * 2);
+                c->y += c->line;
+            }
+            gap(c, 1);
+            if (e->exists) {
+                row_begin(c);
+                c->row_x = c->x + cw * 2;
+                if (button(c, "Открыть", true)) set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
+                if (button(c, "Папка", false))  set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
+                row_end(c);
+            } else {
+                text(c, "файла на месте нет — строку реестра пора убрать", c->theme->row_text_dim);
+            }
+            reveal_task_once(c, s->cwd, -3, i, row_top);
         }
         gap(c, 0);
         c->y += 4;
