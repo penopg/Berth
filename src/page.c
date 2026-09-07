@@ -121,7 +121,7 @@ static void gap(Ctx *c, int lines)
 // размер шрифта. Правило: заголовок ближе к своему содержимому, чем к
 // чужому. Раньше эти числа стояли по месту, и разделы читались сплошняком.
 enum {
-    SP_SECTION = 22,   // перед заголовком раздела — самый большой отступ
+    SP_SECTION = 30,   // перед заголовком раздела — самый большой отступ
     SP_HEAD    = 10,   // от черты заголовка до первой строки: подсветка
                        // первой строки не должна упираться в черту
     SP_ROW     = 4,    // между строками списка
@@ -140,6 +140,11 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
 {
     c->y += SP_SECTION;
     int w = content_width(c);
+    // Полоса, а не черта во всю ширину. Шесть одинаковых волосков через
+    // равные промежутки читались гребёнкой — «здесь всё однородное», ровно
+    // наоборот тому, что они должны говорить. Масса видна прищурившись,
+    // волосок — нет.
+    DrawRectangle(c->x - 8, c->y - 4, w + 16, c->line + 8, c->theme->row_active_bg);
     int hit = 0;
     int right = c->x + w;
     for (int i = 0; i < n; i++) {
@@ -166,7 +171,6 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
         ui_text_clipped(c->font, title, c->x, c->y, c->theme->row_text, room);
     }
     c->y += c->line;
-    DrawRectangle(c->x, c->y - 3, w, 1, c->theme->sidebar_border);
     c->y += SP_HEAD;
     return hit;
 }
@@ -1366,7 +1370,7 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
     } else {
         gap(c, 1);
         row_begin(c);
-        if (button(c, "Новая задача", false))
+        if (button_kind(c, "Новая задача", BTN_QUIET))
             edit_begin(cwd, -1, NULL);
         row_end(c);
     }
@@ -1475,9 +1479,9 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
     row_begin(c);
     // «Новый» заводит папку с паспортом — как newproj.sh, но внутри проекта.
     // «Добавить» — для папки, которая уже есть, но признаков не имеет.
-    if (button(c, "Новый подпроект", false))
+    if (button_kind(c, "Новый подпроект", BTN_QUIET))
         edit_begin_subproject(s->cwd);
-    if (button(c, "Добавить подпроект", false))
+    if (button_kind(c, "Добавить подпроект", BTN_QUIET))
         set_event(c, PAGE_EVENT_ADD_SUBPROJECT, 0, NULL);
     row_end(c);
 }
@@ -1559,7 +1563,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
 
     c->y += SP_ROW;
     row_begin(c);
-    if (button_kind(c, "Новое действие", BTN_PLAIN))
+    if (button_kind(c, "Новое действие", BTN_QUIET))
         set_event(c, PAGE_EVENT_ACTIONS_NEW, 0, NULL);
     row_end(c);
 }
@@ -1624,7 +1628,7 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
         draw_editor(c, 0);
     } else {
         row_begin(c);
-        if (button(c, "Новый скилл", false))
+        if (button_kind(c, "Новый скилл", BTN_QUIET))
             edit_begin_skill(s->cwd);
         row_end(c);
     }
