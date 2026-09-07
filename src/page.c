@@ -139,7 +139,9 @@ static bool visible_hit(const Ctx *c, Vector2 p);
 // Балун подсказки: что это за раздел. Рисуется в конце кадра — иначе всё,
 // что нарисовано после него, его перекроет; тот же приём, что у балуна
 // лимитов в верхней полосе.
-static struct { bool on; int x, y; char text[400]; } g_tip;
+// Текста на 1024 байта: кириллица идёт по два байта на знак, и на 400
+// подсказка обрывалась на полуслове.
+static struct { bool on; int x, y; char text[1024]; } g_tip;
 
 static void tip_at(int x, int y, const char *text)
 {
@@ -189,12 +191,18 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
     // глазами. Постоянная подпись под каждым разделом отняла бы по две
     // строки у всех и читалась бы шумом.
     if (help) {
+        // Кружок с вопросом рисуем примитивами: глиф такой формы есть только
+        // в запасках, и промах дал бы «?» в рамке — ровно то, чего не надо.
         int hx = c->x + tw + c->font->cell_width;
-        Rect hr = { hx - 2, c->y - 2, c->font->cell_width * 3 + 4, c->line + 4 };
-        bool hover = inside(hr, c->mouse) && visible_hit(c, c->mouse);
-        ui_text_clipped(c->font, "(?)", hx, c->y,
-                        hover ? c->theme->row_text : c->theme->row_text_dim,
-                        c->font->cell_width * 3);
+        int hr_px = c->font->cell_height / 2 - 1;
+        Rect hit = { hx - 2, c->y, (float)hr_px * 2 + 6, c->line };
+        bool hover = inside(hit, c->mouse) && visible_hit(c, c->mouse);
+        Color hc = hover ? c->theme->row_text : c->theme->row_text_dim;
+        float cx = (float)hx + (float)hr_px + 1;
+        float cy = (float)c->y + (float)c->font->cell_height / 2.0f;
+        DrawCircleLines((int)cx, (int)cy, (float)hr_px, hc);
+        font_draw_codepoint(c->font, '?', cx - (float)c->font->cell_width / 2.0f,
+                            (float)c->y, (float)c->font->size, hc);
         if (hover) tip_at(hx, c->y, help);
     }
     c->y += c->line;
@@ -1599,7 +1607,9 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
     ui_text_clipped(c->font, "кнопка", c->x, c->y, th->row_text_dim, name_w * cw);
     ui_text_clipped(c->font, "где", col2, c->y, th->row_text_dim, where_w * cw);
     ui_text_clipped(c->font, "куда", col3, c->y, th->row_text_dim, cw * 10);
-    c->y += c->line + 2;
+    c->y += c->line;
+    DrawRectangle(c->x, c->y - 2, content_width(c), 1, th->sidebar_border);
+    c->y += SP_ROW + 2;
 
     for (int i = 0; i < al->count; i++) {
         const Action *a = &al->items[i];
@@ -1684,6 +1694,26 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
 
     const int cw = c->font->cell_width;
     int open_idx = s->page_skill_open - 1;
+
+    // Шапка, как у действий и документов: имя и условие запуска — две колонки,
+    // а не имя с описанием впритык.
+    int name_w = 10;
+    for (int i = 0; i < sl->count; i++) {
+        int n = chars_of(sl->items[i].name);
+        if (n > name_w) name_w = n;
+    }
+    if (name_w > 26) name_w = 26;
+    int col2 = c->x + (name_w + 4 + 2) * cw;   // +2 на стрелку слева
+    if (sl->count > 0) {
+        ui_text_clipped(c->font, "скилл", c->x + cw * 2, c->y, c->theme->row_text_dim,
+                        name_w * cw);
+        ui_text_clipped(c->font, "когда применять", col2, c->y, c->theme->row_text_dim,
+                        c->x + content_width(c) - col2);
+        c->y += c->line;
+        DrawRectangle(c->x, c->y - 2, content_width(c), 1, c->theme->sidebar_border);
+        c->y += SP_ROW + 2;
+    }
+
     for (int i = 0; i < sl->count; i++) {
         const Skill *sk = &sl->items[i];
         bool open = open_idx == i;
@@ -1693,19 +1723,18 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
 
         font_draw_codepoint(c->font, open ? 0x25BE : 0x25B8, (float)c->x, (float)c->y,
                             (float)c->font->size, c->theme->row_text_dim);
-        int x = c->x + cw * 2;
-        int nw = ui_text_clipped(c->font, sk->name, x, c->y, c->theme->row_text, cw * 28);
-        x += nw + cw;
+        ui_text_clipped(c->font, sk->name, c->x + cw * 2, c->y, c->theme->row_text,
+                        name_w * cw);
 
         char line_text[SKILL_DESC_MAX + PROJECT_NAME_MAX + 16];
         if (sk->kind == SKILL_INHERITED)
             snprintf(line_text, sizeof(line_text), "от %s · %s", sk->from, sk->desc);
         else
             snprintf(line_text, sizeof(line_text), "%s", sk->desc);
-        ui_text_clipped(c->font, line_text, x, c->y, c->theme->row_text_dim,
-                        c->x + content_width(c) - x);
+        ui_text_clipped(c->font, line_text, col2, c->y, c->theme->row_text_dim,
+                        c->x + content_width(c) - col2);
         if (hover && c->click) set_event(c, PAGE_EVENT_SKILL_TOGGLE, i, sk->name);
-        c->y += c->line;
+        c->y += c->line + SP_ROW;
 
         if (!open) continue;
         int indent = cw * 2;
@@ -1764,81 +1793,81 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
                  "сами файлы берт находит обходом папки.");
 
     const int cw = c->font->cell_width;
-    for (int i = 0; i < fl->count; i++) {
-        const FileEntry *e = &fl->items[i];
-        bool open = s->page_file_open == i + 1;
-        Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * (open ? 1 : 2) + 6 };
-        bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-        int row_top = r.y;
+    const Theme *th = c->theme;
 
-        Color tone = e->exists ? c->theme->row_text : c->theme->row_text_dim;
-        const char *base = strrchr(e->path, '/');
-        base = base ? base + 1 : e->path;
-
-        // Справа давность; у пропавшего файла — пометка вместо неё.
-        char age[32];
-        if (e->exists) projinfo_age(e->mtime, age, sizeof(age));
-        else           snprintf(age, sizeof(age), "нет файла");
-        int age_w = chars_of(age) * cw;
+    // Тем же способом, что действия: шапка и строка на файл. Двухстрочные
+    // записи (имя, под ним пояснение) на широкой колонке тратили место и
+    // читались лесенкой.
+    if (fl->count > 0) {
+        int name_w = 8;
+        for (int i = 0; i < fl->count; i++) {
+            const char *b = strrchr(fl->items[i].path, '/');
+            int n = chars_of(b ? b + 1 : fl->items[i].path);
+            if (n > name_w) name_w = n;
+        }
+        if (name_w > 30) name_w = 30;
+        int age_w = 11;
+        int col2 = c->x + (name_w + 4) * cw;
         int right = c->x + content_width(c);
-        ui_text_clipped(c->font, age, right - age_w, c->y,
-                        e->exists ? c->theme->row_text_dim : c->theme->badge_attention, age_w);
-        right -= age_w;
-        ui_text_clipped(c->font, base, c->x, c->y, tone, right - c->x - cw);
-        c->y += c->line;
+        int note_w = right - age_w * cw - cw * 2 - col2;
 
-        // Свёрнутый — одна строка пояснения, сколько влезет; клик
-        // раскрывает: пояснение целиком, под ним путь и кнопки.
-        if (hover && c->click) set_event(c, PAGE_EVENT_FILE_TOGGLE, i, NULL);
-        if (!open) {
-            ui_text_clipped(c->font, e->note, c->x + cw * 2, c->y, c->theme->row_text_dim,
-                            content_width(c) - cw * 2);
-            c->y += c->line;
-        } else {
-            body_text(c, e->note, cw * 2, c->theme->row_text);
+        ui_text_clipped(c->font, "файл", c->x, c->y, th->row_text_dim, name_w * cw);
+        ui_text_clipped(c->font, "пояснение", col2, c->y, th->row_text_dim, note_w);
+        ui_text_clipped(c->font, "правлен", right - age_w * cw, c->y, th->row_text_dim,
+                        age_w * cw);
+        c->y += c->line;
+        DrawRectangle(c->x, c->y - 2, content_width(c), 1, th->sidebar_border);
+        c->y += SP_ROW + 2;
+
+        for (int i = 0; i < fl->count; i++) {
+            const FileEntry *e = &fl->items[i];
+            bool open = s->page_file_open == i + 1;
+            Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
+            bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+            if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
+            int row_top = r.y;
+
+            const char *base = strrchr(e->path, '/');
+            base = base ? base + 1 : e->path;
+            char age[32];
+            if (e->exists) projinfo_age(e->mtime, age, sizeof(age));
+            else           snprintf(age, sizeof(age), "нет файла");
+
+            ui_text_clipped(c->font, base, c->x, c->y,
+                            e->exists ? th->row_text : th->row_text_dim, name_w * cw);
+            ui_text_clipped(c->font, e->note, col2, c->y, th->row_text_dim, note_w);
+            ui_text_clipped(c->font, age, right - chars_of(age) * cw, c->y,
+                            e->exists ? th->row_text_dim : th->badge_attention,
+                            chars_of(age) * cw);
+            c->y += c->line + SP_ROW;
+
+            if (hover && c->click) set_event(c, PAGE_EVENT_FILE_TOGGLE, i, NULL);
+            if (!open) continue;
+
+            // Раскрытое — блок с линейкой слева, как у действия.
+            int block_top = c->y;
+            body_text(c, e->note, cw * 2, th->row_text);
             if (base != e->path) {
-                gap(c, 1);
-                ui_text_clipped(c->font, e->path, c->x + cw * 2, c->y, c->theme->row_text_dim,
+                ui_text_clipped(c->font, e->path, c->x + cw * 2, c->y, th->row_text_dim,
                                 content_width(c) - cw * 2);
                 c->y += c->line;
             }
-            gap(c, 1);
+            c->y += SP_ROW;
             if (e->exists) {
                 row_begin(c);
                 c->row_x = c->x + cw * 2;
                 if (button(c, "Открыть", true)) set_event(c, PAGE_EVENT_FILE_OPEN, i, NULL);
                 if (button(c, "Папка", false))  set_event(c, PAGE_EVENT_FILE_REVEAL, i, NULL);
                 row_end(c);
-
-                // Таблицу можно показывать прямо на странице — тогда её не
-                // надо открывать, чтобы вспомнить, что в ней. Мест немного:
-                // страница не витрина файлов, а рабочее место.
-                if (files_is_table(e->path)) {
-                    bool on = files_shown(fl, e->path);
-                    bool room = on || fl->shown_count < FILES_SHOWN_MAX;
-                    row_begin(c);
-                    c->row_x = c->x + cw * 2;
-                    const char *label = "Показывать на странице";
-                    int lw = chars_of(label) * cw;
-                    ui_text_clipped(c->font, label, c->row_x, c->y + 6,
-                                    c->theme->row_text_dim, lw);
-                    c->row_x += lw + cw;
-                    if (room) {
-                        if (toggle(c, on)) set_event(c, PAGE_EVENT_FILE_SHOW, i, NULL);
-                    } else {
-                        ui_text_clipped(c->font, "уже показаны две", c->row_x, c->y + 6,
-                                        c->theme->row_text_dim, cw * 20);
-                    }
-                    row_end(c);
-                }
             } else {
-                text(c, "файла на месте нет — строку реестра пора убрать", c->theme->row_text_dim);
+                text(c, "файла на месте нет — строку реестра пора убрать", th->row_text_dim);
             }
+            DrawRectangle(c->x + 3, block_top, 1, c->y - block_top - 6, th->sidebar_border);
             reveal_task_once(c, s->cwd, -3, i, row_top);
+            c->y += SP_ROW;
         }
-        c->y += SP_ROW;
     }
+
     if (fl->count == 0 && fl->exists)
         text(c, "Реестр пуст", c->theme->row_text_dim);
     if (fl->partial)
