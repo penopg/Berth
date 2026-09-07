@@ -1120,6 +1120,18 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_action_open = (s->page_action_open == ev.arg + 1) ? 0 : ev.arg + 1;
         break;
 
+    case PAGE_EVENT_ACTION_REMOVE: {
+        ProjectState *st = projstate_edit(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->actions.count) break;
+        char name[ACTION_NAME_MAX];
+        snprintf(name, sizeof(name), "%s", st->actions.items[ev.arg].name);
+        bool ok = actions_remove(&st->actions, s->cwd, ev.arg);
+        s->page_action_open = 0;
+        snprintf(s->page_notice, sizeof(s->page_notice),
+                 ok ? "«%s» убрана" : "«%s» убрать не вышло", name);
+        break;
+    }
+
     case PAGE_EVENT_ACTIONS_EDIT: {
         char target[PROJECT_PATH_MAX + 64];
         snprintf(target, sizeof(target), "%s/%s", s->cwd, ACTIONS_FILE);

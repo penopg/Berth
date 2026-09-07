@@ -1502,6 +1502,11 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
         if (open) {
             body_text(c, a->text, cw * 2, c->theme->row_text);
             gap(c, 1);
+            row_begin(c);
+            c->row_x = c->x + cw * 2;
+            if (button(c, "Убрать", false))
+                set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
+            row_end(c);
         } else {
             ui_text_clipped(c->font, a->text, c->x + cw * 2, c->y,
                             c->theme->row_text_dim, content_width(c) - cw * 2);

@@ -43,6 +43,35 @@ static bool parse_scope(const char *field, Action *a)
     return a->target[0] != '\0';
 }
 
+// Разобрать строку в действие. false — строка не действие (комментарий,
+// мусор, нет имени или текста): и загрузка, и удаление считают их одинаково,
+// иначе номера разъехались бы.
+static bool parse_line(char *line, Action *a)
+{
+    if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') return false;
+    char *f1 = line, *f2 = strchr(f1, '\t');
+    if (!f2) return false;
+    *f2++ = '\0';
+    char *f3 = strchr(f2, '\t');
+    if (!f3) return false;
+    *f3++ = '\0';
+    char *f4 = strchr(f3, '\t');
+    if (!f4) return false;
+    *f4++ = '\0';
+
+    memset(a, 0, sizeof(*a));
+    if (!parse_scope(f1, a)) return false;
+    snprintf(a->name, sizeof(a->name), "%s", f2);
+    rtrim(a->name);
+    rtrim(f3);
+    // Пусто — разговор: чаще хочется увидеть ответ, а не молчаливую
+    // правку файла.
+    a->to_task = !strcmp(f3, "задача") || !strcmp(f3, "task");
+    snprintf(a->text, sizeof(a->text), "%s", f4);
+    rtrim(a->text);
+    return a->name[0] && a->text[0];
+}
+
 void actions_load(ActionList *al, const char *cwd)
 {
     memset(al, 0, sizeof(*al));
@@ -57,31 +86,8 @@ void actions_load(ActionList *al, const char *cwd)
 
     char line[ACTION_TEXT_MAX + ACTION_TARGET_MAX + 128];
     while (fgets(line, sizeof(line), f)) {
-        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
         if (al->count >= ACTIONS_MAX) break;
-
-        char *f1 = line, *f2 = strchr(f1, '\t');
-        if (!f2) continue;
-        *f2++ = '\0';
-        char *f3 = strchr(f2, '\t');
-        if (!f3) continue;
-        *f3++ = '\0';
-        char *f4 = strchr(f3, '\t');
-        if (!f4) continue;
-        *f4++ = '\0';
-
-        Action *a = &al->items[al->count];
-        memset(a, 0, sizeof(*a));
-        if (!parse_scope(f1, a)) continue;
-        snprintf(a->name, sizeof(a->name), "%s", f2);
-        rtrim(a->name);
-        rtrim(f3);
-        // Пусто — разговор: чаще хочется увидеть ответ, а не молчаливую
-        // правку файла.
-        a->to_task = !strcmp(f3, "задача") || !strcmp(f3, "task");
-        snprintf(a->text, sizeof(a->text), "%s", f4);
-        rtrim(a->text);
-        if (a->name[0] && a->text[0]) al->count++;
+        if (parse_line(line, &al->items[al->count])) al->count++;
     }
     fclose(f);
 }
@@ -97,6 +103,36 @@ bool actions_changed(const ActionList *al, const char *cwd)
 // Известно ли имя. Пустая ячейка известной не считается: подставлять
 // пустоту незачем — «оценка , впечатление ,» это не реплика, а мусор.
 // Значит колонка есть, но значения нет, и его надо спросить у человека.
+bool actions_remove(ActionList *al, const char *cwd, int index)
+{
+    if (!cwd || !*cwd || index < 0 || index >= al->count) return false;
+
+    char path[700], tmp[720];
+    actions_path(cwd, path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *in = fopen(path, "r");
+    if (!in) return false;
+    FILE *out = fopen(tmp, "w");
+    if (!out) { fclose(in); return false; }
+
+    char line[ACTION_TEXT_MAX + ACTION_TARGET_MAX + 128];
+    char copy[sizeof(line)];
+    int seen = 0;
+    while (fgets(line, sizeof(line), in)) {
+        snprintf(copy, sizeof(copy), "%s", line);
+        Action a;
+        if (parse_line(line, &a)) {
+            if (seen++ == index) continue;   // эту строку и убираем
+        }
+        fputs(copy, out);
+    }
+    fclose(in);
+    fclose(out);
+    if (rename(tmp, path) != 0) { remove(tmp); return false; }
+    actions_load(al, cwd);
+    return true;
+}
+
 static bool known(const char *name, size_t len, const char *const *names,
                   const char *const *values, int n, const char **val)
 {
