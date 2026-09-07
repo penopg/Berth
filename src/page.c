@@ -1746,7 +1746,17 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
     if (!fl || (!fl->exists && fl->undescribed <= 0)) return;
 
     char title[64];
-    snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы", fl->count);
+    // Число неописанных — в заголовок: свёрнутый список ниже легко
+    // пропустить, а новый файл в проекте как раз и попадает туда.
+    if (fl->undescribed > 0 && fl->count)
+        snprintf(title, sizeof(title), "Документы · %d · %s%d без пояснения",
+                 fl->count, fl->scan_cut ? "не меньше " : "", fl->undescribed);
+    else if (fl->undescribed > 0)
+        snprintf(title, sizeof(title), "Документы · %s%d без пояснения",
+                 fl->scan_cut ? "не меньше " : "", fl->undescribed);
+    else
+        snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы",
+                 fl->count);
     section_help(c, title, NULL,
                  "Файлы проекта, сделанные для чтения человеком: документы, "
                  "таблицы, отчёты, картинки. Пояснения берутся из "

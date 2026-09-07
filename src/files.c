@@ -254,6 +254,9 @@ static const char *base_of(const char *rel)
 bool files_is_document(const char *rel)
 {
     const char *base = base_of(rel);
+    // «~$имя.xlsx» — файл-замок Word и Excel, живёт, пока документ открыт.
+    // Документом он не является ни секунды.
+    if (base[0] == '~' && base[1] == '$') return false;
     const char *dot = strrchr(base, '.');
     if (!dot) return false;
     bool doc = false;
