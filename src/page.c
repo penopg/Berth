@@ -1666,9 +1666,8 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
     const int cw = c->font->cell_width;
     const Theme *th = c->theme;
 
-    // Имя таблицы в строке нужно, как только целей больше одной: кнопка
-    // привязана к файлу, и «у записи» без имени тогда не отвечает на «где».
-    // При одной таблице имя в каждой строке — повтор.
+    // Сколько разных таблиц: по ним и группируем. При одной группировать
+    // нечего — имя файла было бы повтором в каждой строке.
     int targets = 0;
     for (int i = 0; i < al->count; i++) {
         bool seen = false;
@@ -1676,7 +1675,6 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
             if (!strcmp(al->items[k].target, al->items[i].target)) seen = true;
         if (!seen) targets++;
     }
-    bool show_target = targets > 1 || tables > 1;
 
     char head[64];
     snprintf(head, sizeof(head), al->count ? "Действия · %d" : "Действия", al->count);
@@ -1720,47 +1718,61 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
     // её было нельзя. Список записей с полями и должен выглядеть списком
     // записей — тем же способом, каким на этой же странице показана таблица
     // данных.
+    //
+    // Кнопки сгруппированы по таблице: привязка у них к файлу, и с двумя
+    // таблицами шесть строк читались одним списком, где имя файла
+    // повторялось в каждой. Имя таблицы — подзаголовок, «где» под ним
+    // схлопывается до «у записи / у таблицы».
+    bool grouped = targets > 1;
+    int indent = grouped ? cw * 2 : 0;
     int name_w = 8;
     for (int i = 0; i < al->count; i++) {
         int n = chars_of(al->items[i].name) + 2;   // с кавычками
         if (n > name_w) name_w = n;
     }
     if (name_w > 26) name_w = 26;
-    int where_w = show_target ? 26 : 10;
+    int where_w = 10;
     // Колонки разводим на четыре знакоместа: на двух слова смыкались.
-    int col2 = c->x + (name_w + 4) * cw;
+    int col2 = c->x + indent + (name_w + 4) * cw;
     int col3 = col2 + (where_w + 4) * cw;
 
-    ui_text_clipped(c->font, "кнопка", c->x, c->y, th->row_text_dim, name_w * cw);
+    ui_text_clipped(c->font, "кнопка", c->x + indent, c->y, th->row_text_dim, name_w * cw);
     ui_text_clipped(c->font, "где", col2, c->y, th->row_text_dim, where_w * cw);
     ui_text_clipped(c->font, "куда", col3, c->y, th->row_text_dim, cw * 10);
     c->y += c->line;
     DrawRectangle(c->x, c->y - 2, content_width(c), 1, th->sidebar_border);
     c->y += SP_ROW + 2;
 
-    for (int i = 0; i < al->count; i++) {
+    // Цели в порядке первого появления: файл принадлежит человеку, и
+    // сортировать его строки под себя незачем.
+    for (int t = 0; t < al->count; t++) {
+        bool first = true;
+        for (int k = 0; k < t; k++)
+            if (!strcmp(al->items[k].target, al->items[t].target)) first = false;
+        if (!first) continue;
+
+        if (grouped) {
+            const char *base = strrchr(al->items[t].target, '/');
+            ui_text_clipped(c->font, base ? base + 1 : al->items[t].target, c->x, c->y,
+                            th->row_text, content_width(c));
+            c->y += c->line + SP_ROW;
+        }
+
+        for (int i = t; i < al->count; i++) {
+            if (strcmp(al->items[i].target, al->items[t].target)) continue;
         const Action *a = &al->items[i];
         bool open = s->page_action_open == i + 1;
         Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
         bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
         if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
 
-        char where[64];
-        if (show_target) {
-            const char *base = strrchr(a->target, '/');
-            snprintf(where, sizeof(where), "%s %s",
-                     a->scope == ACTION_ROW ? "у записи" : "у таблицы",
-                     base ? base + 1 : a->target);
-        } else {
-            snprintf(where, sizeof(where), "%s",
-                     a->scope == ACTION_ROW ? "у записи" : "у таблицы");
-        }
         // Имя в кавычках: так видно, что это подпись кнопки, а не поле или
         // состояние. Плашкой рисовать нельзя — она выглядела бы нажимаемой.
         char quoted[ACTION_NAME_MAX + 8];
         snprintf(quoted, sizeof(quoted), "«%s»", a->name);
-        ui_text_clipped(c->font, quoted, c->x, c->y, th->row_text, name_w * cw);
-        ui_text_clipped(c->font, where, col2, c->y, th->row_text_dim, where_w * cw);
+        ui_text_clipped(c->font, quoted, c->x + indent, c->y, th->row_text, name_w * cw);
+        ui_text_clipped(c->font, a->scope == ACTION_ROW ? "у записи" : "у таблицы",
+                        col2, c->y, th->row_text_dim, where_w * cw);
         // Дорога цветом: разговор акцентом — он заговорит с тобой; задача
         // приглушённо — сделает молча.
         ui_text_clipped(c->font, a->to_task ? "задача" : "разговор", col3, c->y,
@@ -1776,13 +1788,13 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
         char what[128];
         snprintf(what, sizeof(what), "клик отправляет %s:",
                  a->to_task ? "задачей, молча" : "репликой в разговор");
-        ui_text_clipped(c->font, what, c->x + cw * 2, c->y, th->row_text_dim,
-                        content_width(c) - cw * 2);
+        ui_text_clipped(c->font, what, c->x + indent + cw * 2, c->y, th->row_text_dim,
+                        content_width(c) - indent - cw * 2);
         c->y += c->line;
-        body_text(c, a->text, cw * 2, th->row_text);
+        body_text(c, a->text, indent + cw * 2, th->row_text);
         c->y += SP_ROW;
         row_begin(c);
-        c->row_x = c->x + cw * 2;
+        c->row_x = c->x + indent + cw * 2;
         // «Попросить» рядом с «Удалить»: поправить текст, повторить кнопку
         // у другой таблицы, переименовать — всё это слова, и пишет их
         // агент. Берт сам делает лишь то, что слов не требует.
@@ -1808,10 +1820,12 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
         if (button_kind(c, "Удалить", BTN_DANGER))
             set_event(c, PAGE_EVENT_ACTION_REMOVE, i, NULL);
         row_end(c);
-        DrawRectangle(c->x + 3, block_top, 1, c->y - block_top - 6, th->sidebar_border);
+        DrawRectangle(c->x + indent + 3, block_top, 1, c->y - block_top - 6,
+                      th->sidebar_border);
         c->y += SP_ROW;
+        }
+        if (grouped) c->y += SP_ROW;
     }
-
     if (al->count == 0)
         text(c, "кнопок над данными пока нет", th->row_text_dim);
 
@@ -2482,13 +2496,27 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
             c->y += SP_ROW;
             for (int i = 0; i < t->col_count; i++) {
                 if (!t->cells[r][i][0]) continue;
-                char line_text[TABLE_CELL_MAX * 2];
+                char line_text[TABLE_CELL_MAX + 8];
                 snprintf(line_text, sizeof(line_text), "%s: ", t->cols[i]);
                 int lw = ui_text_clipped(c->font, line_text, c->x + cw * 2, c->y,
                                          th->row_text_dim, content_width(c) - cw * 2);
-                ui_text_clipped(c->font, t->cells[r][i], c->x + cw * 2 + lw, c->y,
-                                th->row_text, content_width(c) - cw * 2 - lw);
-                c->y += c->line;
+                const char *v = t->cells[r][i];
+                int vx = c->x + cw * 2 + lw;
+                int vw = content_width(c) - cw * 2 - lw;
+                // Значение переносится по словам с висячим отступом: во
+                // впечатлении бывает пара предложений, и обрезать их здесь
+                // некуда — раскрывают запись как раз ради них.
+                if (chars_of(v) * cw <= vw) {
+                    ui_text_clipped(c->font, v, vx, c->y, th->row_text, vw);
+                    c->y += c->line;
+                } else if (vw >= cw * 8) {
+                    draw_wrapped(c, v, vx, vw, th->row_text, true);
+                } else {
+                    // Подпись съела строку — значение идёт следующей.
+                    c->y += c->line;
+                    draw_wrapped(c, v, c->x + cw * 4, content_width(c) - cw * 4,
+                                 th->row_text, true);
+                }
             }
             if (actions_count(al, t, ACTION_ROW) > 0) {
                 row_begin(c);
