@@ -2094,20 +2094,24 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
         }
     }
 
-    // Один ряд под таблицей: сначала показ записей, потом действия над ней.
-    // Раздельными рядами они вставали ступенькой и читались кучей.
-    bool more = t->row_count > limit;
-    bool fold = !more && all && t->row_count > 8;
-    if (more || fold || actions_count(al, t, ACTION_TABLE) > 0) {
+    // Показ записей — не действие, а вид: складная строка под последней
+    // записью, как «Сделано · N» у задач и дни в журнале. Кнопкой рядом с
+    // «Подобрать» она читалась бы как такая же команда над данными.
+    if (t->row_count > 8) {
+        char head[80];
+        if (all)
+            snprintf(head, sizeof(head), "Свернуть до восьми");
+        else
+            snprintf(head, sizeof(head), "Ещё %d %s", t->row_count - limit,
+                     plural3(t->row_count - limit, "запись", "записи", "записей"));
+        if (fold_row(c, head, NULL, all, th->row_text_dim))
+            set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+    }
+
+    // Действия — это уже про данные, поэтому своим рядом и кнопками.
+    if (actions_count(al, t, ACTION_TABLE) > 0) {
         gap(c, 1);
         row_begin(c);
-        if (more) {
-            char label[64];
-            snprintf(label, sizeof(label), "Показать все · %d", t->row_count);
-            if (button(c, label, false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
-        } else if (fold) {
-            if (button(c, "Свернуть", false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
-        }
         actions_buttons(c, s, al, t, -1, ACTION_TABLE);
         row_end(c);
     }
