@@ -68,6 +68,7 @@ static Ctx ctx_begin(const FontAtlas *font, const Theme *theme,
 // прокрученное не наезжало на шапку.
 static void scroll_begin(Ctx *c)
 {
+    ui_clip_rows(c->view.y, c->view.y + c->view.h);
     c->scroll_top = c->y;
     c->y -= c->scroll;
     EndScissorMode();
@@ -79,6 +80,7 @@ static void scroll_begin(Ctx *c)
 // нарисовали, столько и есть — заранее эту высоту неоткуда взять.
 static int ctx_end(const Ctx *c)
 {
+    ui_clip_rows(0, 0);   // дальше рисует панель: ей отсечение не нужно
     EndScissorMode();
     if (!c->scroll_top) return 0;
     int content = c->y + c->scroll - c->scroll_top;
@@ -700,6 +702,9 @@ static int seg_offset_at(const FontAtlas *a, const char *text, const Seg *s, flo
 
 static void seg_draw(Ctx *c, const char *text, const Seg *s, float x, float y, Color color)
 {
+    // Строка вне окна — не рисуем: раскладке она не нужна, а глифы стоят.
+    if (y + (float)c->font->cell_height < (float)c->view.y
+        || y > (float)(c->view.y + c->view.h)) return;
     for (int i = s->start; i < s->start + s->len; ) {
         int sz = 0;
         int cp = GetCodepointNext(text + i, &sz);

@@ -2205,6 +2205,22 @@ int main(int argc, char **argv)
 
         scene_tick(&app, GetFrameTime());
 
+        // BERTH_FPS=1 — раз в секунду печатает, во что обходится кадр:
+        // среднее, худшее и сколько кадров успели. Нужно, когда «кажется,
+        // что просело»: без числа это спор о вкусах.
+        if (getenv("BERTH_FPS")) {
+            static double win_start; static int win_frames; static double win_worst;
+            double now = GetTime(), dt = GetFrameTime();
+            if (dt > win_worst) win_worst = dt;
+            win_frames++;
+            if (now - win_start >= 1.0) {
+                fprintf(stderr, "[fps] %d кадров, среднее %.2f мс, худший %.2f мс\n",
+                        win_frames, (now - win_start) * 1000.0 / win_frames,
+                        win_worst * 1000.0);
+                win_start = now; win_frames = 0; win_worst = 0;
+            }
+        }
+
         BeginDrawing();
         ClearBackground(app.theme.sidebar_bg);
 

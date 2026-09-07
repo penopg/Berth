@@ -25,6 +25,19 @@ static size_t strlen_utf8_cells(const char *s)
     return n;
 }
 
+static int g_clip_top, g_clip_bottom;
+
+void ui_clip_rows(int top, int bottom)
+{
+    g_clip_top = top;
+    g_clip_bottom = bottom;
+}
+
+static bool clipped_out(int y, int h)
+{
+    return g_clip_bottom > g_clip_top && (y + h < g_clip_top || y > g_clip_bottom);
+}
+
 int ui_text_clipped(const FontAtlas *f, const char *text,
                     int x, int y, Color color, int max_width)
 {
@@ -59,7 +72,11 @@ int ui_text_clipped(const FontAtlas *f, const char *text,
     }
 
     buf[written] = '\0';
-    DrawTextEx(font_for(f, buf), buf, (Vector2){ (float)x, (float)y }, (float)f->size, 0, color);
+    // Ширину возвращаем ту же — от неё зависит раскладка; не рисуем только
+    // то, чего всё равно не видно.
+    if (!clipped_out(y, f->cell_height))
+        DrawTextEx(font_for(f, buf), buf, (Vector2){ (float)x, (float)y },
+                   (float)f->size, 0, color);
     return chars * f->cell_width;
 }
 
