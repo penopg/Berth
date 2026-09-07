@@ -262,6 +262,12 @@ static bool button_kind(Ctx *c, const char *label, ButtonKind kind)
         Color bg = hover ? c->theme->row_hover_bg : c->theme->row_active_bg;
         DrawRectangle(r.x, r.y, r.w, r.h, bg);
     }
+    // Тихая кнопка без заливки сливалась со строкой текста: она читалась
+    // подписью, а не кнопкой. Тонкая обводка возвращает ей границы, не
+    // возвращая массы.
+    if (quiet)
+        DrawRectangleLines(r.x, r.y, r.w, r.h,
+                           hover ? c->theme->row_text_dim : c->theme->sidebar_border);
     if (kind == BTN_ACCENT)
         DrawRectangle(r.x, r.y, 3, r.h, c->theme->progress_fill);
 
@@ -1370,7 +1376,7 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
     } else {
         gap(c, 1);
         row_begin(c);
-        if (button_kind(c, "Новая задача", BTN_QUIET))
+        if (button_kind(c, "+ Новая задача", BTN_QUIET))
             edit_begin(cwd, -1, NULL);
         row_end(c);
     }
@@ -1479,9 +1485,9 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
     row_begin(c);
     // «Новый» заводит папку с паспортом — как newproj.sh, но внутри проекта.
     // «Добавить» — для папки, которая уже есть, но признаков не имеет.
-    if (button_kind(c, "Новый подпроект", BTN_QUIET))
+    if (button_kind(c, "+ Новый подпроект", BTN_QUIET))
         edit_begin_subproject(s->cwd);
-    if (button_kind(c, "Добавить подпроект", BTN_QUIET))
+    if (button_kind(c, "+ Добавить подпроект", BTN_QUIET))
         set_event(c, PAGE_EVENT_ADD_SUBPROJECT, 0, NULL);
     row_end(c);
 }
@@ -1563,7 +1569,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ActionList *al,
 
     c->y += SP_ROW;
     row_begin(c);
-    if (button_kind(c, "Новое действие", BTN_QUIET))
+    if (button_kind(c, "+ Новое действие", BTN_QUIET))
         set_event(c, PAGE_EVENT_ACTIONS_NEW, 0, NULL);
     row_end(c);
 }
@@ -1628,7 +1634,7 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
         draw_editor(c, 0);
     } else {
         row_begin(c);
-        if (button_kind(c, "Новый скилл", BTN_QUIET))
+        if (button_kind(c, "+ Новый скилл", BTN_QUIET))
             edit_begin_skill(s->cwd);
         row_end(c);
     }
