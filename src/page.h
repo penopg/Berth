@@ -66,6 +66,7 @@ typedef enum {
     PAGE_EVENT_TABLE_ROW,        // раскрыть запись arg2 таблицы arg
     PAGE_EVENT_TABLE_ALL,        // показать все записи таблицы arg
     PAGE_EVENT_TABLE_OPEN,       // открыть файл таблицы arg
+    PAGE_EVENT_TWO_COLUMNS,      // сложить страницу в одну колонку и обратно
     PAGE_EVENT_TABLE_CFG,        // открыть или закрыть настройку колонок
     PAGE_EVENT_TABLE_COL,        // показывать колонку arg2 таблицы arg или нет
     PAGE_EVENT_TABLE_COLS_ALL,   // показать все колонки таблицы arg
@@ -138,7 +139,8 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
                             const SessionList *sessions,
                             const ProjectList *projects,
                             const FontAtlas *font, const Theme *theme,
-                            Rect view, Vector2 mouse, int scroll);
+                            Rect view, Vector2 mouse, int scroll,
+                            bool two_columns);
 // Редактор нового проекта поверх окна. Он не принадлежит странице: группу
 // заводят из панели, а на экране в этот момент может быть что угодно —
 // поэтому рисуется отдельно, карточкой над областью терминала.

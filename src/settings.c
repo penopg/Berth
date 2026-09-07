@@ -28,6 +28,7 @@ void settings_defaults(Settings *s)
     s->sidebar_visible = true;
     s->open_project_page = true;
     s->task_finish     = TASK_FINISH_REVIEW;
+    s->page_two_columns = true;
     s->collapsed_show_live = true;
     s->usage_fetch     = true;
     s->ctx_warn        = 30;
@@ -102,6 +103,8 @@ bool settings_load(Settings *s, const char *path)
                                  : s->open_project_page;
         else if (!strcmp(key, "usage_fetch"))
             s->usage_fetch = parse_bool(val, s->usage_fetch);
+        else if (!strcmp(key, "page_two_columns"))
+            s->page_two_columns = parse_bool(val, s->page_two_columns);
         else if (!strcmp(key, "collapsed_show_live"))
             s->collapsed_show_live = parse_bool(val, s->collapsed_show_live);
         else if (!strcmp(key, "task_finish"))
@@ -180,6 +183,11 @@ bool settings_save(const Settings *s, const char *path)
         "# она тратит так же, как разговор.\n"
         "task_model = %s\n"
         "\n"
+        "# Страница проекта в две колонки (слева сводка и журнал, справа задачи\n"
+        "# и документы) или одной лентой во всю ширину. Переключается значком\n"
+        "# в шапке страницы.\n"
+        "page_two_columns = %s\n"
+        "\n"
         "# Показывать ли в свёрнутой группе панели проекты с открытым разговором.\n"
         "collapsed_show_live = %s\n"
         "\n"
@@ -218,6 +226,7 @@ bool settings_save(const Settings *s, const char *path)
         s->default_agent,
         tasks_finish_name(s->task_finish),
         s->task_model,
+        s->page_two_columns ? "yes" : "no",
         s->collapsed_show_live ? "yes" : "no",
         s->usage_fetch ? "yes" : "no",
         s->skills_off, s->ctx_warn, s->ctx_crit, s->sleep_after, s->resume_within,

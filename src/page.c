@@ -2218,17 +2218,43 @@ static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const Proj
     text(c, note, theme->row_text_dim);
 }
 
+// Значок правой колонки: рамка со столбцом справа — заполнен, когда колонка
+// на месте. Рисуется примитивами, а не глифом: такого знака в шрифте нет, а
+// зависеть от запаски ради двух прямоугольников незачем.
+static bool columns_button(Ctx *c, bool on)
+{
+    int h = c->font->cell_height - 2;
+    int w = h * 3 / 2;
+    Rect r = { c->x + content_width(c) - w, c->y + 2, w, h };
+    Rect hit = { r.x - 8, r.y - 5, r.w + 16, r.h + 10 };
+    bool hover = inside(hit, c->mouse) && visible_hit(c, c->mouse);
+    if (hover) DrawRectangle(hit.x, hit.y, hit.w, hit.h, c->theme->row_hover_bg);
+    Color line = hover ? c->theme->row_text : c->theme->row_text_dim;
+    DrawRectangleLines(r.x, r.y, r.w, r.h, line);
+    int cx = r.x + r.w - r.w / 3;
+    if (on) DrawRectangle(cx, r.y + 1, r.w / 3 - 1, r.h - 2, c->theme->progress_fill);
+    else    DrawRectangle(cx, r.y + 1, 1, r.h - 2, line);
+    return hover && c->click;
+}
+
 PageEvent page_draw_project(const Session *s, const ProjectState *st,
                             const SessionList *sessions,
                             const ProjectList *projects,
                             const FontAtlas *font, const Theme *theme,
-                            Rect view, Vector2 mouse, int scroll)
+                            Rect view, Vector2 mouse, int scroll,
+                            bool two_columns)
 {
     Ctx c = ctx_begin(font, theme, view, mouse, scroll);
     const ProjInfo *info = &st->info;
 
     revealed_begin();
 
+    // Значок колонок — в шапке, у правого края имени: он про то, как
+    // разложена страница, и стоит там, где кончается её ширина. Узкому окну
+    // выбирать нечего — колонок и так одна.
+    bool can_split = content_width(&c) >= font->cell_width * 110;
+    if (can_split && columns_button(&c, two_columns))
+        set_event(&c, PAGE_EVENT_TWO_COLUMNS, 0, NULL);
     text(&c, s->name, theme->row_text);
 
     // Путь, значок папки и ветка — одной строкой. Папка открывается по
@@ -2331,7 +2357,7 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     // ширине оставляла половину пустой, а задачи уезжали за журнал вниз.
     // Прокрутка одна на обе колонки: страница остаётся одним листом.
     int full = content_width(&c);
-    bool wide = full >= font->cell_width * 110;
+    bool wide = full >= font->cell_width * 110 && two_columns;
     int gutter = font->cell_width * 4;
     int top = c.y;
     int left_x = c.x;
@@ -2565,6 +2591,14 @@ PageEvent page_draw_settings(const Settings *st, const Groups *groups,
     if (button(&c, st->sidebar_visible ? "показана" : "скрыта", true))
         set_event(&c, PAGE_EVENT_TOGGLE_SIDEBAR, 0, NULL);
     setting_note(&c, "Также ⌘B.");
+    setting_end(&c);
+
+    setting_begin(&c, "Страница проекта");
+    if (toggle(&c, st->page_two_columns))
+        set_event(&c, PAGE_EVENT_TWO_COLUMNS, 0, NULL);
+    setting_note(&c, "Две колонки: слева сводка и журнал, справа задачи и документы. "
+                     "Выключено — одна лента во всю ширину. Значок в шапке страницы "
+                     "переключает то же самое.");
     setting_end(&c);
 
     setting_begin(&c, "Свёрнутая группа");

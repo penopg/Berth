@@ -1061,6 +1061,11 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_table_all ^= 1u << ev.arg;
         break;
 
+    case PAGE_EVENT_TWO_COLUMNS:
+        app->settings.page_two_columns = !app->settings.page_two_columns;
+        save_settings(app);
+        break;
+
     case PAGE_EVENT_TABLE_CFG:
         if (ev.arg < 0 || ev.arg >= FILES_SHOWN_MAX) break;
         s->page_table_cfg ^= 1u << ev.arg;
@@ -2096,7 +2101,8 @@ int main(int argc, char **argv)
                                      app.layout.term, pm, active->page_scroll)
                 : page_draw_project(active, projstate_get(active->cwd),
                                     &app.sessions, &app.projects, &app.font, active->theme,
-                                    app.layout.term, pm, active->page_scroll);
+                                    app.layout.term, pm, active->page_scroll,
+                                    app.settings.page_two_columns);
 
             // Прокрутка колесом. Предел берём из того, что нарисовалось в этом
             // кадре: сколько содержимого не поместилось, столько и можно
