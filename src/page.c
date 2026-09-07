@@ -381,18 +381,46 @@ static void reveal(Ctx *c, int top, int bottom)
     c->event.reveal_bottom = bottom;
 }
 
-// Какая раскрытая задача уже показана: просим показать один раз, при
-// раскрытии, а не каждый кадр — иначе колесо не могло бы увести от неё.
-static struct { char cwd[SESSION_PATH_MAX]; int sub, index; } g_revealed = { "", -1, -1 };
+// Что из раскрытого уже показано: просим показать один раз, при
+// раскрытии, а не каждый кадр — иначе колесо не могло бы увести от него.
+// Раскрытых на странице бывает несколько разом (задача, запись журнала,
+// документ), поэтому память — список, а не одна ячейка: с одной ячейкой
+// два раскрытых перебивали друг друга каждый кадр, и страница дёргалась,
+// не давая докрутить до верха. Что за кадр не встретилось — свернули,
+// и следующее раскрытие снова попросит показать себя.
+#define REVEALED_MAX 8
+static struct { char cwd[SESSION_PATH_MAX]; int sub, index; bool seen; }
+    g_revealed[REVEALED_MAX];
+static int g_revealed_n;
 
 static void reveal_task_once(Ctx *c, const char *cwd, int sub, int index, int top)
 {
-    if (g_revealed.index == index && g_revealed.sub == sub && !strcmp(g_revealed.cwd, cwd))
-        return;
-    snprintf(g_revealed.cwd, sizeof(g_revealed.cwd), "%s", cwd);
-    g_revealed.sub = sub;
-    g_revealed.index = index;
+    for (int i = 0; i < g_revealed_n; i++) {
+        if (g_revealed[i].index == index && g_revealed[i].sub == sub
+            && !strcmp(g_revealed[i].cwd, cwd)) {
+            g_revealed[i].seen = true;
+            return;
+        }
+    }
+    int slot = g_revealed_n < REVEALED_MAX ? g_revealed_n++ : 0;
+    snprintf(g_revealed[slot].cwd, sizeof(g_revealed[slot].cwd), "%s", cwd);
+    g_revealed[slot].sub = sub;
+    g_revealed[slot].index = index;
+    g_revealed[slot].seen = true;
     reveal(c, top, c->y);
+}
+
+static void revealed_begin(void)
+{
+    for (int i = 0; i < g_revealed_n; i++) g_revealed[i].seen = false;
+}
+
+static void revealed_end(void)
+{
+    int n = 0;
+    for (int i = 0; i < g_revealed_n; i++)
+        if (g_revealed[i].seen) g_revealed[n++] = g_revealed[i];
+    g_revealed_n = n;
 }
 
 static void set_event(Ctx *c, PageEventKind kind, int arg, const char *text_arg)
@@ -1780,8 +1808,7 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     Ctx c = ctx_begin(font, theme, view, mouse, scroll);
     const ProjInfo *info = &st->info;
 
-    // Ничего не раскрыто — следующее раскрытие снова попросит показать себя.
-    if (!s->page_task_open) g_revealed.index = -1;
+    revealed_begin();
 
     text(&c, s->name, theme->row_text);
 
@@ -1944,6 +1971,7 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
         c.y = end;
     }
 
+    revealed_end();
     c.event.scroll_top = c.scroll_top;
     c.event.overflow = ctx_end(&c);
     return c.event;
