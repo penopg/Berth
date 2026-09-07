@@ -9,6 +9,7 @@
 #include "input.h"
 #include "utf8.h"
 #include "skills_builtin.h"
+#include "actions.h"
 
 // Состояние вывода на время одного кадра: где рисуем, чем и что уже нажали.
 typedef struct {
@@ -503,6 +504,15 @@ static struct {
                            // просим страницу показать его целиком
     char title[TASK_TITLE_MAX];
     char body[TASK_BODY_MAX];
+    // Форма перед действием: поля выведены из шаблона — это подстановки,
+    // которых нет в записи. Названия полей и есть имена подстановок.
+    bool action;
+    int  action_index;                       // номер в ActionList
+    int  ask_n;
+    char ask[ACTION_ASK_MAX][ACTION_LABEL_MAX];
+    char answer[ACTION_ASK_MAX][ACTION_TEXT_MAX];
+    char tmpl[ACTION_TEXT_MAX * 2];          // шаблон с уже подставленной записью
+
     // Новый проект в группе: cwd — папка группы, group — её имя, notice —
     // отказ прошлой попытки (папка есть, имя плохое).
     bool project;
@@ -617,13 +627,20 @@ static void seg_draw(Ctx *c, const char *text, const Seg *s, float x, float y, C
     }
 }
 
+static int edit_fields(void)
+{
+    return g_edit.action ? g_edit.ask_n : 2;
+}
+
 static char *edit_buf(void)
 {
+    if (g_edit.action) return g_edit.answer[g_edit.field];
     return g_edit.field == 0 ? g_edit.title : g_edit.body;
 }
 
 static size_t edit_cap(void)
 {
+    if (g_edit.action) return sizeof(g_edit.answer[0]);
     return g_edit.field == 0 ? sizeof(g_edit.title) : sizeof(g_edit.body);
 }
 
@@ -691,6 +708,19 @@ static void edit_begin_skill(const char *cwd)
 {
     edit_begin(cwd, -1, NULL);
     g_edit.skill = true;
+}
+
+// Форма перед действием: поля — подстановки, которых не нашлось в записи.
+static void edit_begin_action(const char *cwd, int index, int row, const char *tmpl,
+                              char ask[][ACTION_LABEL_MAX], int n)
+{
+    edit_begin(cwd, row, NULL);   // index — запись, под которой рисовать форму
+    g_edit.action = true;
+    g_edit.action_index = index;
+    g_edit.ask_n = n;
+    for (int i = 0; i < n; i++)
+        snprintf(g_edit.ask[i], ACTION_LABEL_MAX, "%s", ask[i]);
+    snprintf(g_edit.tmpl, sizeof(g_edit.tmpl), "%s", tmpl);
 }
 
 void page_new_project_begin(const char *root, const char *group)
@@ -776,16 +806,34 @@ static int edit_keys(void)
     if (key_hit(KEY_END))       g_edit.cursor = (int)strlen(buf);
 
     if (IsKeyPressed(KEY_TAB)) {
-        g_edit.field = !g_edit.field;
+        g_edit.field = (g_edit.field + 1) % edit_fields();
         g_edit.cursor = (int)strlen(edit_buf());
     }
     if (key_hit(KEY_ENTER) || key_hit(KEY_KP_ENTER)) {
-        if (g_edit.field == 0) {
+        if (g_edit.action) {
+            // Поля формы однострочные: Enter ведёт к следующему, а с
+            // последнего отправляет — форму на два поля заполняют не мышью.
+            if (g_edit.field + 1 < g_edit.ask_n) {
+                g_edit.field++;
+                g_edit.cursor = (int)strlen(edit_buf());
+            } else {
+                return 1;
+            }
+        } else if (g_edit.field == 0) {
             g_edit.field = 1;
             g_edit.cursor = (int)strlen(g_edit.body);
         } else {
             edit_insert("\n", 1);
         }
+    }
+    if (g_edit.action && (key_hit(KEY_UP) || key_hit(KEY_DOWN))) {
+        int step = key_hit(KEY_UP) ? -1 : 1;
+        int next = g_edit.field + step;
+        if (next >= 0 && next < g_edit.ask_n) {
+            g_edit.field = next;
+            g_edit.cursor = (int)strlen(edit_buf());
+        }
+        return 0;
     }
 
     // Вверх и вниз — по видимым строкам описания, как они лежали в прошлом
@@ -891,7 +939,10 @@ static void draw_editor(Ctx *c, int indent)
     int top = c->y;
 
     gap(c, 1);
-    if (g_edit.project) {
+    if (g_edit.action) {
+        for (int i = 0; i < g_edit.ask_n; i++)
+            edit_field(c, i, g_edit.answer[i], false, g_edit.ask[i], x, width);
+    } else if (g_edit.project) {
         edit_field(c, 0, g_edit.title, false, "Имя папки проекта", x, width);
         edit_field(c, 1, g_edit.body, true, "О чём — одной строкой, попадёт в паспорт", x, width);
     } else if (g_edit.subproject) {
@@ -907,7 +958,7 @@ static void draw_editor(Ctx *c, int indent)
 
     row_begin(c);
     c->row_x = x;
-    if (button(c, "Сохранить  ⌘↩", true)) action = 1;
+    if (button(c, g_edit.action ? "Отправить  ⌘↩" : "Сохранить  ⌘↩", true)) action = 1;
     if (button(c, "Отмена  esc", false)) action = -1;
     row_end(c);
 
@@ -917,6 +968,24 @@ static void draw_editor(Ctx *c, int indent)
         g_edit.last_height = c->y - top;
         reveal(c, top, c->y);
     }
+
+    if (action == 1 && g_edit.action) {
+        // Подставляем ответы формы в шаблон — и реплика готова.
+        static char prompt[ACTION_TEXT_MAX * 2];
+        const char *names[ACTION_ASK_MAX], *vals[ACTION_ASK_MAX];
+        for (int i = 0; i < g_edit.ask_n; i++) {
+            rtrim_inplace(g_edit.answer[i]);
+            names[i] = g_edit.ask[i];
+            vals[i] = g_edit.answer[i];
+        }
+        action_expand(g_edit.tmpl, names, vals, g_edit.ask_n, prompt, sizeof(prompt),
+                      NULL, 0);
+        set_event(c, PAGE_EVENT_ACTION_RUN, g_edit.action_index, NULL);
+        c->event.prompt = prompt;
+        g_edit.active = false;
+        return;
+    }
+    if (action == -1 && g_edit.action) { g_edit.active = false; return; }
 
     if (action == 1) {
         rtrim_inplace(g_edit.title);
@@ -1104,7 +1173,7 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
     // странице или редактор подпроекта) здесь не показываем, но и не
     // закрываем: он нарисуется в своём разделе.
     bool editing = g_edit.active && !g_edit.subproject && !g_edit.skill && !g_edit.project
-                && !strcmp(g_edit.cwd, cwd);
+                && !g_edit.action && !strcmp(g_edit.cwd, cwd);
 
     bool down     = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
     bool released = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
@@ -1690,6 +1759,57 @@ static struct {
     float grab_dx, grab_dy;
 } g_chip;
 
+// Ряд кнопок-действий для этой таблицы. Действие без вопросов уходит сразу,
+// с вопросами открывает форму. Подстановки берутся из записи (row < 0 —
+// действие над таблицей целиком, тогда подставлять нечего).
+static void draw_editor(Ctx *c, int indent);
+
+// Открыта ли форма действия для этой записи (-1 — для таблицы целиком).
+static bool action_form_here(const Session *s, int row)
+{
+    return g_edit.active && g_edit.action && g_edit.index == row
+        && !strcmp(g_edit.cwd, s->cwd);
+}
+
+static void draw_actions(Ctx *c, const Session *s, const ActionList *al,
+                         const Table *t, int row, ActionScope scope)
+{
+    int shown = 0;
+    for (int i = 0; i < al->count; i++) {
+        const Action *a = &al->items[i];
+        if (a->scope != scope || strcmp(a->target, t->path)) continue;
+        if (!shown++) { row_begin(c); c->row_x = c->x + c->font->cell_width * 2; }
+        if (!button(c, a->name, !a->to_task)) continue;
+
+        const char *names[TABLE_COLS_MAX], *vals[TABLE_COLS_MAX];
+        int n = 0;
+        if (row >= 0)
+            for (int k = 0; k < t->col_count; k++) {
+                names[n] = t->cols[k];
+                vals[n] = t->cells[row][k];
+                n++;
+            }
+        static char tmpl[ACTION_TEXT_MAX * 2];
+        char ask[ACTION_ASK_MAX][ACTION_LABEL_MAX];
+        int asked = action_expand(a->text, names, vals, n, tmpl, sizeof(tmpl),
+                                  ask, ACTION_ASK_MAX);
+        if (asked > 0) {
+            edit_begin_action(s->cwd, i, row, tmpl, ask, asked);
+        } else {
+            set_event(c, PAGE_EVENT_ACTION_RUN, i, NULL);
+            c->event.prompt = tmpl;
+        }
+    }
+    if (shown) row_end(c);
+    // Механизм невидим, пока у таблицы нет ни одной кнопки: строчка-подсказка
+    // и есть способ о нём узнать. Показываем только у записи и только когда
+    // кнопок нет вовсе — иначе она превратится в шум.
+    if (!shown && scope == ACTION_ROW && al->count == 0)
+        text(c, "действий нет — попроси агента завести кнопку над этой таблицей",
+             c->theme->row_text_dim);
+    if (action_form_here(s, row)) draw_editor(c, c->font->cell_width * 2);
+}
+
 static const Table *g_sort_table;
 static int  g_sort_col;
 static bool g_sort_desc;
@@ -1719,7 +1839,8 @@ static int cmp_rows(const void *pa, const void *pb)
     return g_sort_desc ? -r : r;
 }
 
-static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
+static void draw_table(Ctx *c, const Session *s, const ActionList *al,
+                       const Table *t, int idx)
 {
     const int cw = c->font->cell_width;
     const Theme *th = c->theme;
@@ -1955,6 +2076,7 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
                                 th->row_text, content_width(c) - cw * 2 - lw);
                 c->y += c->line;
             }
+            draw_actions(c, s, al, t, r, ACTION_ROW);
             reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
             gap(c, 1);
         }
@@ -1980,6 +2102,8 @@ static void draw_table(Ctx *c, const Session *s, const Table *t, int idx)
         if (button(c, "Свернуть", false)) set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
         row_end(c);
     }
+
+    draw_actions(c, s, al, t, -1, ACTION_TABLE);
 
     // Что не влезло в ширину, из списка выпало молча — об этом надо сказать,
     // иначе колонка выглядит потерянной. Скрытая настройкой — выбор
@@ -2372,7 +2496,7 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     // таблице нужна ширина, а справа она встала бы в 2/5 экрана и
     // растеряла бы колонки.
     for (int i = 0; i < st->table_count; i++)
-        draw_table(&c, s, &st->tables[i], i);
+        draw_table(&c, s, &st->actions, &st->tables[i], i);
 
     draw_journal(&c, s, &st->journal, info);
 

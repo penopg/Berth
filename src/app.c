@@ -1061,6 +1061,61 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_table_all ^= 1u << ev.arg;
         break;
 
+    // Действие над данными: реплика уже собрана страницей — подстановки
+    // из записи и ответы формы. Берту остаётся выбрать дорогу.
+    case PAGE_EVENT_ACTION_RUN: {
+        const ProjectState *st = projstate_peek(s->cwd);
+        if (!st || ev.arg < 0 || ev.arg >= st->actions.count || !ev.prompt) break;
+        const Action *a = &st->actions.items[ev.arg];
+
+        if (!a->to_task) {
+            // Результат в ответе — реплика в разговор проекта, и уводим в
+            // терминал: человек задал вопрос и ждёт ответа.
+            say_to_conversation(app, s, s->cwd, ev.prompt, cols, rows);
+            int main = session_of_project(&app->sessions, s->cwd);
+            if (main >= 0) {
+                session_activate(&app->sessions, main);
+                resize_all(app);
+            }
+            break;
+        }
+
+        // Результат в файле — вкладка-задача на простой модели, молча.
+        // Текст идёт через файл: в командной строке ему делать нечего —
+        // кавычки, апострофы, «ёлочки».
+        char path[PROJECT_PATH_MAX];
+        snprintf(path, sizeof(path), "%s/prompt.txt", config_dir());
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "Не удалось записать %s", path);
+            break;
+        }
+        fputs(ev.prompt, f);
+        fclose(f);
+
+        int was = app->sessions.active;
+        char cmd[PROJECT_PATH_MAX + 600];
+        snprintf(cmd, sizeof(cmd),
+                 "claude -p \"$(cat '%s')\" --verbose --no-session-persistence%s "
+                 "--permission-mode acceptEdits "
+                 "--allowed-tools \"Bash(awk *)\" \"Bash(sort *)\" \"Bash(head *)\" "
+                 "Read Glob Grep Edit Write WebSearch WebFetch",
+                 path, task_model_flag(app));
+        int tab = open_task(app, s->project, s->cwd, a->name, cmd);
+        if (tab >= 0) {
+            session_activate(&app->sessions, was);
+            resize_all(app);
+            save_layout(app);
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "«%s» — задача пошла, видна в панели", a->name);
+        } else {
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
+        }
+        break;
+    }
+
     case PAGE_EVENT_TWO_COLUMNS:
         app->settings.page_two_columns = !app->settings.page_two_columns;
         save_settings(app);

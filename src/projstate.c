@@ -41,6 +41,7 @@ static void load(ProjectState *st, const char *cwd)
     st->journal_mtime = journal_file_mtime(cwd);
     tasks_load(&st->tasks, cwd);
     files_load(&st->files, cwd);
+    actions_load(&st->actions, cwd);
     for (int i = 0; i < st->files.shown_count; i++) {
         table_load(&st->tables[i], cwd, st->files.shown[i]);
         table_set_cols(&st->tables[i], st->files.shown_cols[i]);
@@ -130,6 +131,9 @@ void projstate_poll(void)
         else
             files_refresh(&st->files, st->cwd);
         sync_tables(st);
+        // Действия правит агент по просьбе человека — как задачи и реестр.
+        if (actions_changed(&st->actions, st->cwd))
+            actions_load(&st->actions, st->cwd);
         projinfo_refresh_summary(&st->info);
         // Дневник дописал агент (задача сбора кончилась) или человек:
         // лента перечитывается сама, кнопка «Обновить» для этого не нужна.
