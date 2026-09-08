@@ -526,51 +526,55 @@ void journal_load(Journal *j, const char *cwd)
 
     char dir[600];
     projinfo_session_dir(cwd, dir, sizeof(dir));
-    if (!dir[0]) return;
 
-    char cache[700];
-    cache_path(cwd, cache, sizeof(cache));
+    // Истории Claude Code может не быть вовсе: проект новый, или дневник
+    // приехал с репозиторием на чужую машину. Раньше здесь стоял выход, и
+    // вместе с историей терялись сами записи дневника — а они лежат в
+    // проекте и от истории не зависят. Поэтому историю разбираем, только
+    // если она есть, а `read_recaps` ниже отрабатывает в любом случае.
+    DIR *d = dir[0] ? opendir(dir) : NULL;
+    if (d) {
+        char cache[700];
+        cache_path(cwd, cache, sizeof(cache));
 
-    Marks marks;
-    memset(&marks, 0, sizeof(marks));
-    if (cache[0]) cache_read(j, &marks, cache);
+        Marks marks;
+        memset(&marks, 0, sizeof(marks));
+        if (cache[0]) cache_read(j, &marks, cache);
 
-    DIR *d = opendir(dir);
-    if (!d) return;
+        bool changed = false;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            const char *dot = strrchr(e->d_name, '.');
+            if (!dot || strcmp(dot, ".jsonl")) continue;
 
-    bool changed = false;
-    struct dirent *e;
-    while ((e = readdir(d))) {
-        const char *dot = strrchr(e->d_name, '.');
-        if (!dot || strcmp(dot, ".jsonl")) continue;
+            char sid[PROJINFO_ID_MAX];
+            size_t n = (size_t)(dot - e->d_name);
+            if (n >= sizeof(sid)) n = sizeof(sid) - 1;
+            memcpy(sid, e->d_name, n);
+            sid[n] = '\0';
 
-        char sid[PROJINFO_ID_MAX];
-        size_t n = (size_t)(dot - e->d_name);
-        if (n >= sizeof(sid)) n = sizeof(sid) - 1;
-        memcpy(sid, e->d_name, n);
-        sid[n] = '\0';
+            char path[900];
+            snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
+            struct stat st;
+            if (stat(path, &st) != 0) continue;
 
-        char path[900];
-        snprintf(path, sizeof(path), "%s/%s", dir, e->d_name);
-        struct stat st;
-        if (stat(path, &st) != 0) continue;
+            long done = mark_get(&marks, sid);
+            if (done >= st.st_size) continue;   // с прошлого раза ничего не дописали
 
-        long done = mark_get(&marks, sid);
-        if (done >= st.st_size) continue;   // с прошлого раза ничего не дописали
+            long parsed = done;
+            parse_tail(j, path, sid, done, &parsed);
+            mark_set(&marks, sid, parsed);
+            changed = true;
+        }
+        closedir(d);
 
-        long parsed = done;
-        parse_tail(j, path, sid, done, &parsed);
-        mark_set(&marks, sid, parsed);
-        changed = true;
+        qsort(j->events, (size_t)j->count, sizeof(j->events[0]), by_time);
+        dedup(j);
+
+        if (changed && cache[0]) cache_write(j, &marks, cache);
     }
-    closedir(d);
 
-    qsort(j->events, (size_t)j->count, sizeof(j->events[0]), by_time);
-    dedup(j);
-
-    if (changed && cache[0]) cache_write(j, &marks, cache);
-
-    // Дневник читаем после записи кэша: в кэше живёт разбор истории, а записи
+    // Дневник читаем после разбора истории: в кэше живёт разбор, а записи
     // дневника человек правит руками, и держать их копию незачем.
     read_recaps(j, cwd);
     qsort(j->events, (size_t)j->count, sizeof(j->events[0]), by_time);
