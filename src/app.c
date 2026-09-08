@@ -23,6 +23,7 @@
 #include "projects.h"
 #include "agent.h"
 #include "claude.h"
+#include "demo.h"
 #include "ui.h"
 #include "usage.h"
 #include "groups.h"
@@ -1981,8 +1982,14 @@ int main(int argc, char **argv)
     const char *cfg = settings_path();
     // Файла может ещё не быть. Создаём его сразу с умолчаниями: настройку
     // правят руками, а для этого её надо сперва увидеть.
-    if (cfg && !settings_load(&app.settings, cfg))
+    // Настроек нет — значит берт на этой машине запускается впервые. Признак
+    // нужен ниже: пустая панель о продукте не рассказывает ничего, поэтому
+    // первый запуск раскладывает демо-проекты.
+    bool first_run = false;
+    if (cfg && !settings_load(&app.settings, cfg)) {
         settings_save(&app.settings, cfg);
+        first_run = true;
+    }
     // Тема окна — из настроек, до восстановления вкладок: их терминалы
     // красятся по тому же правилу.
     app.theme = *theme_by_name(app.settings.theme_panel);
@@ -2019,6 +2026,19 @@ int main(int argc, char **argv)
     usage_load(&app.usage);
     find_brief_script(&app);
     groups_load(&app.groups, groups_path());
+    // Демо-проекты первого запуска: три настоящие папки в каталоге берта,
+    // подключённые своей группой. Дальше они ничем не отличаются от прочих —
+    // группу можно скрыть крестиком, папку удалить.
+    char demo_first[SESSION_PATH_MAX] = "";
+    if (first_run) {
+        char demo_dir[PROJECT_PATH_MAX];
+        if (demo_install(config_dir(), demo_dir, sizeof(demo_dir),
+                         demo_first, sizeof(demo_first))
+            && groups_add(&app.groups, demo_dir, NULL, 0))
+            groups_save(&app.groups);
+        else
+            demo_first[0] = '\0';
+    }
     projects_load(&app.projects, projects_default_path());
     groups_apply(&app.groups, &app.projects);
     layout_init(&app.layout, metrics_for(&app.font));
@@ -2046,12 +2066,21 @@ int main(int argc, char **argv)
         }
         session_activate(&app.sessions, 0);
     } else if (restore_layout(&app) == 0) {
-        // Восстанавливать нечего — открываем оболочку там, откуда запустили:
-        // терминал открыли, ещё не выбрав, чем заняться.
-        char cwd[SESSION_PATH_MAX];
-        if (!getcwd(cwd, sizeof(cwd))) cwd[0] = '\0';
-        open_session(&app, projects_find_by_path(&app.projects, cwd),
-                     cwd[0] ? cwd : NULL, agent_default());
+        if (demo_first[0]) {
+            // Первый запуск: показываем страницу демо-проекта, а не оболочку.
+            // Продукт объясняется собой, и объяснение должно быть на экране
+            // сразу, без единого клика.
+            open_tab(&app, projects_find_by_path(&app.projects, demo_first),
+                     demo_first, agent_by_id("claude"),
+                     SESSION_KIND_PAGE, SESSION_PAGE_PROJECT);
+        } else {
+            // Восстанавливать нечего — открываем оболочку там, откуда запустили:
+            // терминал открыли, ещё не выбрав, чем заняться.
+            char cwd[SESSION_PATH_MAX];
+            if (!getcwd(cwd, sizeof(cwd))) cwd[0] = '\0';
+            open_session(&app, projects_find_by_path(&app.projects, cwd),
+                         cwd[0] ? cwd : NULL, agent_default());
+        }
     }
 
     if (app.sessions.count == 0) {
