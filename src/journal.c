@@ -5,6 +5,7 @@
 #include <sys/stat.h>
 #include <time.h>
 
+#include "settings.h"
 #include "journal.h"
 
 // Кэш разбора. История проекта доходит до десятков мегабайт, а событий в ней
@@ -17,7 +18,7 @@ static const char *cache_dir(void)
     static char dir[600];
     if (dir[0]) return dir;
 
-    const char *home = getenv("HOME");
+    const char *home = berth_home();
     if (!home) return NULL;
     snprintf(dir, sizeof(dir), "%s/.config/berth/journal", home);
     mkdir(dir, 0755);   // если уже есть — просто EEXIST

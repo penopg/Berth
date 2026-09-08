@@ -74,6 +74,13 @@ static int parse_int(const char *v, int lo, int hi, int fallback)
     return (int)n;
 }
 
+const char *berth_home(void)
+{
+    const char *own = getenv("BERTH_HOME");
+    if (own && *own) return own;
+    return getenv("HOME");
+}
+
 bool settings_load(Settings *s, const char *path)
 {
     FILE *f = fopen(path, "r");

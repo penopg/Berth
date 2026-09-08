@@ -3,6 +3,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "settings.h"
 #include "projects.h"
 #include "json.h"
 
@@ -11,7 +12,7 @@ const char *projects_default_path(void)
     static char path[PROJECT_PATH_MAX];
     if (path[0]) return path;
 
-    const char *home = getenv("HOME");
+    const char *home = berth_home();
     if (!home) return NULL;
     snprintf(path, sizeof(path), "%s/.claude/warp-tabs/projects.json", home);
     return path;

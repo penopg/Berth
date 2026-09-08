@@ -153,7 +153,7 @@ static const char *config_dir(void)
     static char dir[PROJECT_PATH_MAX];
     if (dir[0]) return dir;
 
-    const char *home = getenv("HOME");
+    const char *home = berth_home();
     if (!home) return NULL;
     snprintf(dir, sizeof(dir), "%s/.config/berth", home);
 
@@ -167,6 +167,14 @@ static const char *config_dir(void)
             return dir;
     }
 
+    // Родителя создаём тоже: у настоящего дома `~/.config` есть всегда, а у
+    // подложенного через BERTH_HOME его нет, и mkdir не рекурсивный.
+    // Сам дом тоже: BERTH_HOME может указывать на папку, которой ещё нет, —
+    // раз на неё показали, берт её и заводит. У настоящего дома это EEXIST.
+    char parent[PROJECT_PATH_MAX];
+    mkdir(home, 0755);
+    snprintf(parent, sizeof(parent), "%s/.config", home);
+    mkdir(parent, 0755);
     mkdir(dir, 0755);   // если уже есть — просто EEXIST
     return dir;
 }
