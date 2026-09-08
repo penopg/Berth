@@ -3,9 +3,9 @@
 #
 # Почему не CMake, как у Ghostling: build.zig ghostty безусловно собирает
 # XCFramework для iOS, а это требует полного Xcode, хотя README обещает
-# Command Line Tools. Сама libghostty-vt при этом собирается нормально —
-# `zig build lib-vt` доходит до конца. Поэтому зависимости собираем адресно,
-# а линкуем компилятором напрямую.
+# Command Line Tools. Сама libghostty-vt при этом собирается нормально, если
+# позвать её адресно (см. ниже про опции), — поэтому зависимости собираем
+# адресно, а линкуем компилятором напрямую.
 #
 # Переменные:
 #   DEPS   — куда класть исходники и артефакты зависимостей (по умолчанию vendor/)
@@ -24,7 +24,12 @@ GHOSTTY_COMMIT="f64f4aca2c29b554d111b36c3d946a9bddd159ff"
 RAYLIB_VERSION="5.5"
 RAYLIB_URL="https://github.com/raysan5/raylib/archive/refs/tags/${RAYLIB_VERSION}.tar.gz"
 
+# Основной шрифт вшивается в бинарь. vendor/ не в репозитории, поэтому у
+# свежего клона его нет: качаем, как и шрифт иконок. Версия закреплена —
+# из атласа берутся кодпоинты, и «просто свежий» шрифт менял бы их молча.
+FONT_VERSION="2.304"
 FONT_TTF="${FONT_TTF:-$ROOT/vendor/fonts/JetBrainsMono-Regular.ttf}"
+FONT_URL="https://github.com/JetBrains/JetBrainsMono/raw/v${FONT_VERSION}/fonts/ttf/JetBrainsMono-Regular.ttf"
 # Иконки проектов (папка, ветка, логотипы языков) живут в приватной области
 # Unicode: их знает только Nerd Font. Без него на их месте «?».
 NERD_TTF="${NERD_TTF:-$ROOT/vendor/fonts/SymbolsNerdFontMono-Regular.ttf}"
@@ -48,8 +53,14 @@ if [ ! -f "$GHOSTTY_LIB" ]; then
     git -C "$GHOSTTY_SRC" fetch --depth 1 origin "$GHOSTTY_COMMIT" 2>/dev/null || true
     git -C "$GHOSTTY_SRC" checkout -q "$GHOSTTY_COMMIT"
     say "собираю libghostty-vt (несколько минут при первом запуске)"
-    # Именно lib-vt, а не полная сборка: полная упирается в XCFramework.
-    (cd "$GHOSTTY_SRC" && zig build lib-vt -Doptimize=ReleaseFast)
+    # Только libghostty-vt, и обе опции обязательны. Шага `lib-vt` у этого
+    # коммита нет — есть опция `-Demit-lib-vt`, и без неё конфигурация
+    # безусловно доходит до XCFramework под iOS: `DarwinSdkNotFound`, потому
+    # что iOS SDK в Command Line Tools не входит. А в режиме lib-vt ghostty
+    # включает свой xcframework, как только видит в PATH `xcodebuild` (он есть
+    # и без полного Xcode, только ничего не умеет), — поэтому гасим и его.
+    (cd "$GHOSTTY_SRC" && zig build -Demit-lib-vt=true -Demit-xcframework=false \
+                                    -Doptimize=ReleaseFast)
     [ -f "$GHOSTTY_LIB" ] || die "libghostty-vt.a не появилась"
 fi
 
@@ -102,6 +113,17 @@ if [ ! -f "$SPRITES_HEADER" ] || [ "$ROOT/assets/sprites/slice.py" -nt "$SPRITES
 fi
 
 # --- шрифт в заголовок -------------------------------------------------------
+if [ ! -f "$FONT_TTF" ]; then
+    say "качаю JetBrains Mono $FONT_VERSION"
+    mkdir -p "$(dirname "$FONT_TTF")"
+    if curl -fsSL -o "$FONT_TTF.part" "$FONT_URL"; then
+        mv -f "$FONT_TTF.part" "$FONT_TTF"
+    else
+        rm -f "$FONT_TTF.part"
+        die "не скачался шрифт: $FONT_URL (положите файл в $FONT_TTF или задайте FONT_TTF)"
+    fi
+fi
+
 FONT_HEADER="$OUT/font_jetbrains_mono.h"
 CP_HEADER="$OUT/font_codepoints.h"
 if [ ! -f "$FONT_HEADER" ] || [ ! -f "$CP_HEADER" ] || [ "$FONT_TTF" -nt "$FONT_HEADER" ]; then
