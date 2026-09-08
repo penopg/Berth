@@ -7,11 +7,7 @@
 ![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
 ![Status: prototype](https://img.shields.io/badge/status-рабочий%20прототип-orange.svg)
 
-<!-- Сюда — снимок окна: панель проектов слева, страница проекта справа.
-     Снять можно с демо-проектов первого запуска, тогда на картинке не будет
-     ничего личного:  screencapture -w -o assets/screenshot.png
-     и раскомментировать строку ниже.
-![Berth](assets/screenshot.png) -->
+![Страница проекта в Berth: панель проектов слева, сводка, дневник работы и задачи справа](assets/screenshot.png)
 
 Berth — причал: у каждого проекта своя стоянка, к которой можно вернуться, и
 всё пришвартованное остаётся на месте.

@@ -2802,6 +2802,23 @@ static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const Proj
 // Значок правой колонки: рамка со столбцом справа — заполнен, когда колонка
 // на месте. Рисуется примитивами, а не глифом: такого знака в шрифте нет, а
 // зависеть от запаски ради двух прямоугольников незачем.
+// Путь под домом показываем с «~»: у живого проекта это половина строки
+// («/Users/имя/personal/…»), которая одинакова у всех и потому не несёт
+// ничего. Сокращаем только по границе каталога, иначе «/Users/имядругое»
+// превратилось бы в «~другое».
+static const char *home_short(const char *path, char *out, size_t cap)
+{
+    const char *home = getenv("HOME");
+    size_t n = home ? strlen(home) : 0;
+    if (!path || !home || n == 0) return path;
+    while (n > 1 && home[n - 1] == '/') n--;   // хвостовой слэш в HOME бывает
+    if (strncmp(path, home, n) != 0) return path;
+    if (path[n] != '/' && path[n] != '\0') return path;
+
+    snprintf(out, cap, "~%s", path + n);
+    return out;
+}
+
 static bool columns_button(Ctx *c, bool on)
 {
     int h = c->font->cell_height - 2;
@@ -2845,7 +2862,9 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     {
         int x = c.x;
         int branch_room = info->branch[0] ? font->cell_width * 24 : font->cell_width * 4;
-        int w = ui_text_clipped(font, info->cwd, x, c.y, theme->row_text_dim,
+        char cwd_buf[SESSION_PATH_MAX];
+        const char *cwd_shown = home_short(info->cwd, cwd_buf, sizeof(cwd_buf));
+        int w = ui_text_clipped(font, cwd_shown, x, c.y, theme->row_text_dim,
                                 content_width(&c) - branch_room);
         x += w + font->cell_width;
         Rect ir = { x - 4, c.y - 2, font->cell_width * 2 + 8, c.line + 4 };
