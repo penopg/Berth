@@ -29,11 +29,33 @@ typedef struct {
     int    parent;
     time_t subs_mtime;
     time_t dir_mtime;   // время правки самой папки: новая подпапка меняет его
+
+    // Сколько записей таблицы ждут человека (фильтр в shown.tsv) и как это
+    // назвать: панель пишет «· 3 не разобрано» у имени. Заполняет опрос.
+    int    pending;
+    char   pending_label[48];
 } Project;
+
+#define PROJECT_PINNED_GROUPS_MAX 8
+
+// Группа с видом (см. `Groups.kind`): интеграции и всё, что появится
+// такого же рода. В панели такие стоят **первыми** и рисуются на своей
+// подложке — это оснастка, а не рабочие проекты, и путать их не надо. И
+// показываются даже без проектов: заголовок группы рождается из первого её
+// проекта, а группе интеграций надо быть видной до того, как в ней что-то
+// появится. Заполняет groups_apply, читает layout.
+typedef struct {
+    char  name[PROJECT_NAME_MAX];
+    Color color;
+    bool  empty;    // проектов нет — заголовок всё равно нужен
+} PinnedGroup;
 
 typedef struct {
     Project items[PROJECT_MAX];
     int     count;
+
+    PinnedGroup pinned[PROJECT_PINNED_GROUPS_MAX];
+    int         pinned_count;
 
     char   source[PROJECT_PATH_MAX];
     time_t mtime;                   // чтобы замечать правку файла без перезапуска

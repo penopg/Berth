@@ -260,26 +260,10 @@ static void subst(char *line, size_t cap, const char *key, const char *val)
     }
 }
 
-bool subprojects_create(const char *project, const char *name, const char *oneline,
-                        char *err, size_t err_cap)
+// Паспорт по шаблону системы вкладок — тот же, что кладёт newproj.sh.
+static bool write_passport(const char *dir, const char *name, const char *oneline,
+                           char *err, size_t err_cap)
 {
-    if (err && err_cap) err[0] = '\0';
-    if (!name || !*name || name[0] == '.' || strchr(name, '/')) {
-        if (err) snprintf(err, err_cap, "Имя — это имя папки: без «/», не с точки");
-        return false;
-    }
-
-    char dir[PROJECT_PATH_MAX];
-    snprintf(dir, sizeof(dir), "%s/%s", project, name);
-    if (exists(dir)) {
-        if (err) snprintf(err, err_cap, "«%s» уже есть в этой папке", name);
-        return false;
-    }
-    if (mkdir(dir, 0755) != 0) {
-        if (err) snprintf(err, err_cap, "Не удалось создать папку %s", dir);
-        return false;
-    }
-
     char date[16];
     time_t now = time(NULL);
     struct tm tm;
@@ -290,7 +274,7 @@ bool subprojects_create(const char *project, const char *name, const char *oneli
     snprintf(passport, sizeof(passport), "%s/CLAUDE.md", dir);
     FILE *out = fopen(passport, "w");
     if (!out) {
-        if (err) snprintf(err, err_cap, "Папка создана, но паспорт записать не удалось");
+        if (err) snprintf(err, err_cap, "Папка есть, но паспорт записать не удалось");
         return false;
     }
 
@@ -313,4 +297,52 @@ bool subprojects_create(const char *project, const char *name, const char *oneli
     }
     fclose(out);
     return true;
+}
+
+bool subprojects_create(const char *project, const char *name, const char *oneline,
+                        char *err, size_t err_cap)
+{
+    if (err && err_cap) err[0] = '\0';
+    if (!name || !*name || name[0] == '.' || strchr(name, '/')) {
+        if (err) snprintf(err, err_cap, "Имя — это имя папки: без «/», не с точки");
+        return false;
+    }
+
+    char dir[PROJECT_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", project, name);
+    if (exists(dir)) {
+        if (err) snprintf(err, err_cap, "«%s» уже есть в этой папке", name);
+        return false;
+    }
+    if (mkdir(dir, 0755) != 0) {
+        if (err) snprintf(err, err_cap, "Не удалось создать папку %s", dir);
+        return false;
+    }
+
+    return write_passport(dir, name, oneline, err, err_cap);
+}
+
+
+// Папка уже есть — подключить её как проект: паспорт дописывается, только
+// если его нет (папку мог завести агент со своим CLAUDE.md, и стирать его
+// нельзя). «Уже есть» — не отказ, когда просят «покажи в панели».
+bool subprojects_adopt(const char *project, const char *name, const char *oneline,
+                       char *err, size_t err_cap)
+{
+    if (err && err_cap) err[0] = '\0';
+    if (!name || !*name || name[0] == '.' || strchr(name, '/')) {
+        if (err) snprintf(err, err_cap, "Имя — это имя папки: без «/», не с точки");
+        return false;
+    }
+    char dir[PROJECT_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", project, name);
+    struct stat st;
+    if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)) {
+        if (err) snprintf(err, err_cap, "«%s» — не папка", name);
+        return false;
+    }
+    char passport[PROJECT_PATH_MAX + 16];
+    snprintf(passport, sizeof(passport), "%s/CLAUDE.md", dir);
+    if (exists(passport)) return true;
+    return write_passport(dir, name, oneline, err, err_cap);
 }

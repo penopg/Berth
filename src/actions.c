@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -58,18 +59,38 @@ static bool parse_line(char *line, Action *a)
     char *f4 = strchr(f3, '\t');
     if (!f4) return false;
     *f4++ = '\0';
+    char *f5 = strchr(f4, '\t');
+    if (f5) *f5++ = '\0';
 
     memset(a, 0, sizeof(*a));
+    if (f5) {
+        rtrim(f5);
+        long every = strtol(f5, NULL, 10);
+        a->every = every > 0 && every < 100000 ? (int)every : 0;
+    }
     if (!parse_scope(f1, a)) return false;
     snprintf(a->name, sizeof(a->name), "%s", f2);
     rtrim(a->name);
     rtrim(f3);
     // Пусто — разговор: чаще хочется увидеть ответ, а не молчаливую
     // правку файла.
-    a->to_task = !strcmp(f3, "задача") || !strcmp(f3, "task");
+    a->road = ROAD_TALK;
+    if (!strcmp(f3, "задача") || !strcmp(f3, "task")) a->road = ROAD_TASK;
+    else if (!strcmp(f3, "команда") || !strcmp(f3, "command") || !strcmp(f3, "cmd"))
+        a->road = ROAD_CMD;
+    a->to_task = a->road == ROAD_TASK;
     snprintf(a->text, sizeof(a->text), "%s", f4);
     rtrim(a->text);
     return a->name[0] && a->text[0];
+}
+
+const char *action_road_name(const Action *a)
+{
+    switch (a->road) {
+    case ROAD_TASK: return "задача";
+    case ROAD_CMD:  return "команда";
+    default:        return "разговор";
+    }
 }
 
 void actions_load(ActionList *al, const char *cwd)

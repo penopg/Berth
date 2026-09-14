@@ -21,6 +21,8 @@
 #include "table.h"
 #include "actions.h"
 
+#define PROJSTATE_MAX 8   // наборов в кэше; вытесняется самый давний
+
 typedef struct {
     char     cwd[512];
     ProjInfo info;
@@ -66,5 +68,9 @@ void projstate_sync_tables(const char *cwd);
 // Заметить правки задач на диске: агент отмечает сделанное прямо в файле.
 // Дешёвый опрос — по stat на проект, — зовётся раз в пару секунд.
 void projstate_poll(void);
+
+// Обход кэша по номеру: NULL — пусто или за краем. Таймеры команд идут
+// только у проектов, которые открывали, — их и держит кэш.
+const ProjectState *projstate_cached(int i);
 
 #endif // BERTH_PROJSTATE_H

@@ -45,6 +45,12 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleVersion</key>           <string>0.1</string>
     <key>LSMinimumSystemVersion</key>    <string>11.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
+    <!-- Зачем берту управлять другими приложениями: он читает почту
+         из уже настроенного клиента, чтобы показать письма и завести
+         по ним задачи. Без этого ключа macOS показывает безымянное
+         «A program wants to use AppleScript». -->
+    <key>NSAppleEventsUsageDescription</key>
+    <string>Berth читает письма из настроенного почтового клиента, чтобы показать их в проекте и завести по ним задачи.</string>
 </dict>
 </plist>
 PLIST

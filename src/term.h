@@ -127,6 +127,10 @@ bool term_screen_status(Term *t, const char *msg);
 // которых на экране нет. -1, если крутилки с числом на экране нет.
 long term_screen_tokens(Term *t);
 
+// Собрать без ожидания процессы, которые не умерли при закрытии вкладки.
+// Звать из цикла кадра изредка.
+void term_reap_orphans(void);
+
 // true, если сессия ещё жива.
 static inline bool term_alive(const Term *t) { return !t->child_exited; }
 

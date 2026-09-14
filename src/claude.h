@@ -39,6 +39,8 @@ void claude_install_bundle(const char *off);
 // Команда запуска с подключённой папкой берта: «claude …» превращается в
 // «claude --add-dir '<папка>' …». Чужие команды (оболочка) не трогаются.
 void claude_with_bundle(const char *cmd, char *out, size_t cap);
+// Текст наказа берта — для тестов и экрана настроек.
+const char *claude_rules_text(void);
 
 // Есть ли у проекта прошлые сессии — то есть можно ли продолжить диалог,
 // а не начинать с чистого листа.

@@ -35,6 +35,7 @@ void settings_defaults(Settings *s)
     s->ctx_crit        = 60;
     s->sleep_after     = 30;
     s->resume_within   = 24;
+    s->forget_after    = 3;
     snprintf(s->default_agent, sizeof(s->default_agent), "claude");
     snprintf(s->task_model, sizeof(s->task_model), "sonnet");
     snprintf(s->theme_panel, sizeof(s->theme_panel), "berth");
@@ -130,6 +131,8 @@ bool settings_load(Settings *s, const char *path)
             s->sleep_after = parse_int(val, 0, 100000, s->sleep_after);
         else if (!strcmp(key, "resume_within"))
             s->resume_within = parse_int(val, 0, 100000, s->resume_within);
+        else if (!strcmp(key, "forget_after"))
+            s->forget_after = parse_int(val, 0, 100000, s->forget_after);
         else if (!strcmp(key, "skills_off"))
             snprintf(s->skills_off, sizeof(s->skills_off), "%s", val);
         else if (!strcmp(key, "marker") && *val)
@@ -222,6 +225,11 @@ bool settings_save(const Settings *s, const char *path)
         "# по кнопке тем же id. 0 — поднимать все.\n"
         "resume_within = %d\n"
         "\n"
+        "# Вкладку без процесса (страницу, оболочку), которую не открывали N дней,\n"
+        "# закрывать и при запуске не поднимать. Живой разговор не трогается.\n"
+        "# 0 — не забывать.\n"
+        "forget_after = %d\n"
+        "\n"
         "# Маркер активного разговора в панели: dot — точка, karateka — сценка с\n"
         "# каратекой (бой, пока агент работает; победа; поклон, когда зовёт).\n"
         "marker = %s\n",
@@ -237,7 +245,7 @@ bool settings_save(const Settings *s, const char *path)
         s->collapsed_show_live ? "yes" : "no",
         s->usage_fetch ? "yes" : "no",
         s->skills_off, s->ctx_warn, s->ctx_crit, s->sleep_after, s->resume_within,
-        s->marker);
+        s->forget_after, s->marker);
 
     fclose(f);
     remember_mtime(path);

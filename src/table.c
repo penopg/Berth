@@ -26,6 +26,62 @@ static int chars_of(const char *s)
     return n;
 }
 
+static bool digits(const char *s, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (s[i] < '0' || s[i] > '9') return false;
+    return true;
+}
+
+void table_cell_text(const char *raw, char *out, size_t cap)
+{
+    if (!raw) { if (cap) out[0] = '\0'; return; }
+
+    // Дата контракта данных: ГГГГ-ММ-ДД, за ней может идти ЧЧ:ММ.
+    if (digits(raw, 4) && raw[4] == '-' && digits(raw + 5, 2) && raw[7] == '-'
+        && digits(raw + 8, 2)
+        && (raw[10] == '\0' || raw[10] == ' ' || raw[10] == 'T')) {
+        static const char *months[12] = { "янв", "фев", "мар", "апр", "мая", "июн",
+                                          "июл", "авг", "сен", "окт", "ноя", "дек" };
+        int y = atoi(raw), m = atoi(raw + 5), d = atoi(raw + 8);
+        bool has_time = raw[10] && digits(raw + 11, 2) && raw[13] == ':' && digits(raw + 14, 2);
+        if (m >= 1 && m <= 12 && d >= 1 && d <= 31) {
+            char hm[8] = "";
+            if (has_time) snprintf(hm, sizeof(hm), " %.5s", raw + 11);
+            time_t now = time(NULL), yd = now - 86400;
+            struct tm tn, ty;
+            localtime_r(&now, &tn);
+            localtime_r(&yd, &ty);
+            bool today = y == tn.tm_year + 1900 && m == tn.tm_mon + 1 && d == tn.tm_mday;
+            bool yest  = y == ty.tm_year + 1900 && m == ty.tm_mon + 1 && d == ty.tm_mday;
+            if (today)                      snprintf(out, cap, "сегодня%s", hm);
+            else if (yest)                  snprintf(out, cap, "вчера%s", hm);
+            else if (y == tn.tm_year + 1900) snprintf(out, cap, "%d %s%s", d, months[m - 1], hm);
+            else                            snprintf(out, cap, "%d %s %d", d, months[m - 1], y);
+            return;
+        }
+    }
+
+    // Адрес почты: «Имя <адрес>» — имя; имени нет — сам адрес.
+    size_t len = strlen(raw);
+    const char *lt = strchr(raw, '<');
+    if (lt && len > 0 && raw[len - 1] == '>' && strchr(lt, '@')) {
+        size_t n = (size_t)(lt - raw);
+        while (n > 0 && raw[n - 1] == ' ') n--;
+        if (n >= 2 && raw[0] == '"' && raw[n - 1] == '"') { raw++; n -= 2; }
+        if (n > 0) {
+            if (n >= cap) n = cap - 1;
+            memcpy(out, raw, n);
+            out[n] = '\0';
+        } else {
+            snprintf(out, cap, "%.*s", (int)(len - (size_t)(lt - raw) - 2), lt + 1);
+        }
+        return;
+    }
+
+    snprintf(out, cap, "%s", raw);
+}
+
 // Число ли это целиком: «7.3» да, «7.3/10» и «к просмотру» нет. Пустая
 // ячейка не мешает: неизвестное значение по формату оставляют пустым.
 static bool numeric(const char *s)
@@ -82,6 +138,19 @@ static int split(char *line, char cells[TABLE_COLS_MAX][TABLE_CELL_MAX], int *ta
     return total;
 }
 
+// Главная — среди показанных колонок: у списка писем самая длинная в
+// среднем — спрятанный «фрагмент», и выбор по всем колонкам отдавал ему
+// место, которого на экране нет.
+static void pick_main(Table *t)
+{
+    t->main_col = -1;
+    for (int i = 0; i < t->col_count; i++) {
+        if (!t->col_show[i] || t->col_avg[i] <= 0) continue;
+        if (t->main_col < 0 || t->col_avg[i] > t->col_avg[t->main_col]) t->main_col = i;
+    }
+    t->two_line = t->main_col >= 0 && t->col_avg[t->main_col] >= 60;
+}
+
 void table_load(Table *t, const char *cwd, const char *rel)
 {
     memset(t, 0, sizeof(*t));
@@ -99,11 +168,34 @@ void table_load(Table *t, const char *cwd, const char *rel)
     FILE *f = fopen(path, "r");
     if (!f) return;
     t->mtime = file_mtime(path);
+    t->filter_col = -1;
+
+    // Записей больше предела — берём **последние**: таблицы, которые
+    // наполняются сами (письма), дописываются в конец, и новое лежит там.
+    // Первый проход только считает, второй читает.
+    char line[4096];
+    long total = 0;
+    {
+        bool head = true;
+        while (fgets(line, sizeof(line), f)) {
+            size_t len = strlen(line);
+            if (len > 0 && line[len - 1] != '\n' && len == sizeof(line) - 1) {
+                int ch;
+                while ((ch = fgetc(f)) != EOF && ch != '\n') { }
+            }
+            char *p = line;
+            rtrim(p);
+            if (!*p) continue;
+            if (head) { head = false; continue; }
+            total++;
+        }
+        rewind(f);
+    }
+    long skip = total > TABLE_ROWS_MAX ? total - TABLE_ROWS_MAX : 0;
 
     // Строка длиннее буфера — редкость (ячейка на 64 байта, колонок дюжина),
     // но хвост такой строки не должен стать следующей записью: дочитываем
     // его до перевода строки и выбрасываем.
-    char line[4096];
     bool first = true;
     while (fgets(line, sizeof(line), f)) {
         size_t len = strlen(line);
@@ -135,19 +227,36 @@ void table_load(Table *t, const char *cwd, const char *rel)
         }
 
         t->file_rows++;
+        if (t->file_rows <= skip) continue;
         if (t->row_count >= TABLE_ROWS_MAX) continue;
         int taken = 0;
         char (*row)[TABLE_CELL_MAX] = t->cells[t->row_count];
         int total = split(p, row, &taken);
         if (total > t->col_count) t->wide = true;
-        for (int i = 0; i < t->col_count; i++) {
-            int w = chars_of(row[i]);
-            if (w > t->col_chars[i]) t->col_chars[i] = w;
+        for (int i = 0; i < t->col_count; i++)
             if (t->col_num[i] && !numeric(row[i])) t->col_num[i] = false;
-        }
         t->row_count++;
     }
     fclose(f);
+
+    // Ширины — по показанной форме ячеек, не по сырой: «2026-09-03 17:30»
+    // занимает в списке 11 знаков, а не 16. Здесь же средняя длина и выбор
+    // главной колонки.
+    t->main_col = -1;
+    for (int i = 0; i < t->col_count; i++) {
+        long sum = 0;
+        int n = 0;
+        for (int r = 0; r < t->row_count; r++) {
+            if (!t->cells[r][i][0]) continue;
+            char shown[TABLE_CELL_MAX];
+            table_cell_text(t->cells[r][i], shown, sizeof(shown));
+            int w = chars_of(shown);
+            if (w > t->col_chars[i]) t->col_chars[i] = w;
+            sum += w;
+            n++;
+        }
+        t->col_avg[i] = n ? (int)(sum / n) : 0;
+    }
 
     for (int i = 0; i < t->col_count; i++) {
         t->col_show[i] = true;
@@ -160,6 +269,33 @@ void table_load(Table *t, const char *cwd, const char *rel)
         bool any = false;
         for (int r = 0; r < t->row_count && !any; r++) any = t->cells[r][i][0] != '\0';
         if (!any) t->col_num[i] = false;
+    }
+
+    // Главная — после того, как колонки помечены показанными: выбор идёт
+    // только среди них.
+    pick_main(t);
+    table_set_filter(t, NULL, false, NULL);
+}
+
+void table_set_filter(Table *t, const char *col, bool empty, const char *label)
+{
+    t->filter_col = -1;
+    t->filter_empty = empty;
+    t->filter_label[0] = '\0';
+    if (col && *col)
+        for (int i = 0; i < t->col_count; i++)
+            if (!strcmp(t->cols[i], col)) { t->filter_col = i; break; }
+    if (t->filter_col >= 0 && label)
+        snprintf(t->filter_label, sizeof(t->filter_label), "%s", label);
+    t->pass_count = 0;
+    for (int r = 0; r < t->row_count; r++) {
+        bool pass = true;
+        if (t->filter_col >= 0) {
+            bool has = t->cells[r][t->filter_col][0] != '\0';
+            pass = empty ? !has : has;
+        }
+        t->row_pass[r] = pass;
+        if (pass) t->pass_count++;
     }
 }
 
@@ -202,6 +338,7 @@ void table_set_cols(Table *t, const char *spec)
     bool any = false;
     for (int i = 0; i < t->col_count; i++) any = any || t->col_show[i];
     if (!any) for (int i = 0; i < t->col_count; i++) t->col_show[i] = true;
+    pick_main(t);
 }
 
 void table_cols_spec(const Table *t, char *out, size_t cap)

@@ -40,6 +40,35 @@ void ui_draw_topbar(const Layout *l, const SessionList *sessions,
                     const Usage *usage,
                     const FontAtlas *font, const Theme *theme, Vector2 mouse);
 
+// Контекстное меню по правому щелчку в панели. Место для того, что делают
+// редко: отдельный раздел на странице ради удаления проекта — перекос, а
+// меню не стоит ни пикселя, пока его не позвали. Геометрия считается при
+// открытии и не меняется, поэтому рисование и попадание смотрят на одно и
+// то же — как у строк панели, живущих между кадрами.
+enum {
+    UI_MENU_NONE = 0,
+    UI_MENU_CLOSE_SESSION,   // погасить разговор, папку не трогать
+    UI_MENU_REVEAL,          // показать папку в Finder
+    UI_MENU_HIDE,            // убрать проект из списка; на диске — ничего
+    UI_MENU_RENAME,          // своё имя в панели; папка на диске та же
+};
+
+void ui_menu_open(const char *cwd, bool has_session, Vector2 at,
+                  const FontAtlas *f);
+// Меню заголовка группы: «Переименовать» (только у группы-папки, can_rename)
+// и «Показать папку» (dir; пусто — пункта нет).
+void ui_menu_open_group(const char *label, const char *dir, bool can_rename,
+                        Vector2 at, const FontAtlas *f);
+bool ui_menu_is_open(void);
+bool ui_menu_is_group(void);
+const char *ui_menu_label(void);   // подпись строки, по которой открыли
+const char *ui_menu_cwd(void);
+void ui_menu_close(void);
+// Пункт под мышью и закрытие меню. Щелчок мимо меню закрывает его и
+// возвращает UI_MENU_NONE: меню съедает клик, чтобы он не ушёл в панель.
+int  ui_menu_click(Vector2 mouse, const FontAtlas *f);
+void ui_menu_draw(const FontAtlas *f, const Theme *th, Vector2 mouse);
+
 void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
                      const SessionList *sessions,
                      const FontAtlas *font, const Theme *theme,

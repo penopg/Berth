@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
 
@@ -695,3 +696,4 @@ time_t journal_file_mtime(const char *cwd)
     if (stat(path, &sb) != 0) return 0;
     return sb.st_mtime;
 }
+

@@ -267,6 +267,17 @@ void term_request_close(Term *t)
 // Простой блокирующий waitpid здесь не годится: агент по SIGHUP не обязан
 // уходить сразу — он может дописывать историю диалога, — а окно в это время
 // висит с курсором ожидания. Даём время уйти по-хорошему, потом настаиваем.
+// Дети, не умершие после SIGKILL: ждать их нельзя, забыть — оставить
+// зомби, когда ядро всё же их отпустит. Список короткий и статический.
+#define ORPHAN_MAX 64
+static pid_t g_orphans[ORPHAN_MAX];
+static int   g_orphan_n = 0;
+
+static void orphan_add(pid_t pid)
+{
+    if (g_orphan_n < ORPHAN_MAX) g_orphans[g_orphan_n++] = pid;
+}
+
 static void reap_child(Term *t)
 {
     if (t->child <= 0 || t->child_reaped) return;
@@ -285,9 +296,32 @@ static void reap_child(Term *t)
         usleep(step_ms * 1000);
     }
 
-    // После SIGKILL ждать уже безопасно: его не игнорируют.
-    waitpid(t->child, NULL, 0);
+    // SIGKILL не игнорируют — но процесс, застрявший в ядре на выходе
+    // (macOS показывает его как «?Es»), не умирает и от него. Блокирующий
+    // waitpid здесь повесил окно целиком: «Закрыть разговор» у вкладки,
+    // чья оболочка застряла так, — и крутилка навсегда. Поэтому ждём ещё
+    // секунду и отпускаем: pid уходит в список сирот, их собирает
+    // term_reap_orphans без ожидания, а ядро доделает своё когда сможет.
+    for (int i = 0; i < 100; i++) {
+        if (waitpid(t->child, NULL, WNOHANG) > 0) {
+            t->child_reaped = true;
+            return;
+        }
+        usleep(step_ms * 1000);
+    }
+    fprintf(stderr, "berth: процесс %d не умирает после SIGKILL, оставлен ядру\n",
+            (int)t->child);
+    orphan_add(t->child);
     t->child_reaped = true;
+}
+
+void term_reap_orphans(void)
+{
+    for (int i = g_orphan_n - 1; i >= 0; i--) {
+        // >0 — собран, -1 — уже не наш (ECHILD): в обоих случаях долой.
+        if (waitpid(g_orphans[i], NULL, WNOHANG) != 0)
+            g_orphans[i] = g_orphans[--g_orphan_n];
+    }
 }
 
 void term_close(Term *t)

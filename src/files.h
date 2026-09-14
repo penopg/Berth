@@ -23,6 +23,7 @@
 #define FILES_SHOWN_MAX  2    // сколько таблиц разом показываем на странице
 #define FILES_COLS_MAX   8    // у скольких снятых таблиц помним вид колонок
 #define FILES_SHOWN_FILE ".berth/shown.tsv"
+#define FILES_FILTER_MAX 4
 
 typedef struct {
     char   path[FILE_PATH_MAX];   // как в реестре, относительно корня
@@ -66,8 +67,23 @@ typedef struct {
     char   cols_path[FILES_COLS_MAX][FILE_PATH_MAX];
     char   cols_spec[FILES_COLS_MAX][FILE_NOTE_MAX];
     int    cols_count;
+
+    // Фильтр показа: какие записи таблицы ещё ждут человека. Строка
+    // `filter\t<путь>\t<колонка>\t<пусто|не пусто>\t<подпись>` в том же
+    // файле: страница показывает только такие записи (остальные складываются
+    // под «Остальные · N»), в заголовке и в панели стоит их число с подписью.
+    // Общая вещь, не почтовая: у писем колонка «статус», у кандидатов
+    // «вердикт», у фильмов «оценка». Один фильтр на таблицу.
+    char   filt_path[FILES_FILTER_MAX][FILE_PATH_MAX];
+    char   filt_col[FILES_FILTER_MAX][64];
+    bool   filt_empty[FILES_FILTER_MAX];
+    char   filt_label[FILES_FILTER_MAX][48];
+    int    filt_count;
     time_t shown_mtime;
 } FileList;
+
+// Номер фильтра у этой таблицы или -1.
+int files_filter_of(const FileList *fl, const char *rel);
 
 void files_load(FileList *fl, const char *cwd);
 bool files_changed(const FileList *fl, const char *cwd);   // реестр на диске другой

@@ -60,11 +60,13 @@ typedef enum {
     PAGE_EVENT_SKILL_EDIT,       // открыть SKILL.md в редакторе
     PAGE_EVENT_NEW_SKILL,        // завести скилл; title — имя, body — когда применять
     // Документы из реестра .berth/files.tsv. arg — номер строки реестра.
+    PAGE_EVENT_TODO_ARCHIVE_OPEN, // открыть tasks-done.md в редакторе
     PAGE_EVENT_FILE_TOGGLE,      // раскрыть или свернуть документ
     PAGE_EVENT_FILE_SHOW,        // показывать таблицу на странице или нет
     PAGE_EVENT_TABLE_SORT,       // сортировать таблицу arg по колонке arg2
     PAGE_EVENT_TABLE_ROW,        // раскрыть запись arg2 таблицы arg
     PAGE_EVENT_TABLE_ALL,        // показать все записи таблицы arg
+    PAGE_EVENT_TABLE_REST,       // раскрыть или сложить записи под фильтром
     PAGE_EVENT_TABLE_OPEN,       // открыть файл таблицы arg
     // Действие над данными: arg — номер в ActionList, event.prompt — готовая
     // реплика (подстановки уже сделаны, форма заполнена).
@@ -92,6 +94,11 @@ typedef enum {
     PAGE_EVENT_DESCRIBE_FILE,    // описать один неописанный файл; arg — номер
     PAGE_EVENT_UNDESC_TOGGLE,    // раскрыть или свернуть список без пояснения
 
+    PAGE_EVENT_NEW_MAILBOX,      // подключить ящик: cwd — папка группы, title — адрес,
+                                 // body — короткое имя (может быть пустым)
+    PAGE_EVENT_INTEGRATIONS_DIR, // выбрать папку группы интеграций (из карточки выбора)
+    PAGE_EVENT_RENAME,           // своё имя в панели: cwd — путь группы или проекта,
+                                 // title — имя (пустое — вернуть имя папки), arg — 1 у группы
     PAGE_EVENT_NEW_PROJECT,      // завести проект в группе: cwd — папка группы, text — группа,
                                  // title — имя папки, body — о чём одной строкой
 
@@ -160,6 +167,18 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 // заводят из панели, а на экране в этот момент может быть что угодно —
 // поэтому рисуется отдельно, карточкой над областью терминала.
 void      page_new_project_begin(const char *root, const char *group);
+// Карточка выбора интеграции: «+» у группы с видом «интеграции» ведёт сюда,
+// а не сразу к новому проекту.
+void      page_integration_begin(const char *root, const char *group);
+
+// Подключение почтового ящика: два поля — адрес и короткое имя. Отдельно от
+// карточки нового проекта: у ящика спрашивают не имя папки, а адрес.
+void      page_mail_begin(const char *root, const char *group);
+// Не вышло завести — вернуть карточку с тем же текстом и причиной.
+void      page_mail_failed(const char *why);
+// Переименование в панели: одно поле, имя только для панели. path — папка
+// группы или каталог проекта, current — как называется сейчас.
+void      page_rename_begin(const char *path, const char *current, bool group);
 void      page_new_project_failed(const char *why);   // вернуть редактор с ошибкой
 bool      page_overlay_active(void);
 // Окно просьбы агенту: контекст собирает берт (что за место, какие файлы),

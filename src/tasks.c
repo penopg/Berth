@@ -1,12 +1,81 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include "tasks.h"
 
 static void tasks_path(const char *cwd, char *out, size_t cap)
 {
     snprintf(out, cap, "%s/%s", cwd, TASKS_FILE);
+}
+
+static void tasks_done_path(const char *cwd, char *out, size_t cap)
+{
+    snprintf(out, cap, "%s/%s", cwd, TASKS_DONE_FILE);
+}
+
+// Сколько задач в архиве. Разбирать его нельзя: он растёт без предела, и
+// чтение целиком вернуло бы ту же беду с другой стороны. Нужно только
+// число для строки на странице — считаем заголовки, не читая тел.
+static int tasks_count_archived(const char *cwd)
+{
+    char path[700];
+    tasks_done_path(cwd, path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+
+    int n = 0;
+    bool line_start = true;         // длинная строка приходит из fgets кусками
+    char line[1024];
+    while (fgets(line, sizeof(line), f)) {
+        if (line_start && !strncmp(line, "## ", 3)) n++;
+        line_start = strchr(line, '\n') != NULL;
+    }
+    fclose(f);
+    return n;
+}
+
+// Сделанные уезжают в свой файл в момент записи — то есть тогда же, когда
+// человек нажал «Сделано». Дописываем в конец, а не переписываем: архив
+// принадлежит человеку и растёт только с хвоста.
+static bool tasks_archive_done(TaskList *t, const char *cwd)
+{
+    int done = 0;
+    for (int i = 0; i < t->count; i++)
+        if (t->items[i].state == TASK_DONE) done++;
+    if (done == 0) return true;
+
+    char dir[700], path[700];
+    snprintf(dir, sizeof(dir), "%s/.berth", cwd);
+    mkdir(dir, 0755);
+    tasks_done_path(cwd, path, sizeof(path));
+
+    bool fresh = access(path, F_OK) != 0;
+    FILE *f = fopen(path, "a");
+    if (!f) return false;
+    if (fresh)
+        fprintf(f, "# Сделанные задачи\n\n"
+                   "Сюда берт переносит задачи, отмеченные сделанными. Формат тот же,\n"
+                   "что у `tasks.md`: чтобы вернуть задачу в работу, перенесите её блок\n"
+                   "обратно.\n\n");
+    for (int i = 0; i < t->count; i++) {
+        const Task *task = &t->items[i];
+        if (task->state != TASK_DONE) continue;
+        fprintf(f, "## [x] %s\n", task->title);
+        if (task->body[0]) fprintf(f, "%s\n", task->body);
+        fputc('\n', f);
+    }
+    if (fflush(f) != 0) { fclose(f); return false; }
+    if (fclose(f) != 0) return false;
+
+    // Из списка убираем только после того, как архив их принял.
+    int n = 0;
+    for (int i = 0; i < t->count; i++)
+        if (t->items[i].state != TASK_DONE) t->items[n++] = t->items[i];
+    t->count = n;
+    t->archived += done;
+    return true;
 }
 
 static time_t file_mtime(const char *path)
@@ -35,6 +104,8 @@ void tasks_load(TaskList *t, const char *cwd)
 {
     memset(t, 0, sizeof(*t));
     if (!cwd || !*cwd) return;
+
+    t->archived = tasks_count_archived(cwd);
 
     char path[700];
     tasks_path(cwd, path, sizeof(path));
@@ -82,9 +153,20 @@ void tasks_load(TaskList *t, const char *cwd)
     for (int i = 0; i < t->count; i++) rtrim(t->items[i].body);
 }
 
-bool tasks_save(const TaskList *t, const char *cwd)
+bool tasks_save(TaskList *t, const char *cwd)
 {
     if (!cwd || !*cwd) return false;
+
+    // Файл прочитан не целиком (задач больше TASK_MAX), а пишем мы всё, что
+    // в списке, — значит перезапись стёрла бы хвост, которого мы не видели.
+    // Лучше не сохранить перестановку, чем потерять чужие задачи: вызывающий
+    // покажет человеку, что записать не вышло.
+    if (t->partial) return false;
+
+    // Сделанные в tasks.md не пишем вовсе — они уезжают в архив. Если архив
+    // их не принял, основной файл не трогаем: потерять задачу хуже, чем не
+    // сохранить перестановку.
+    if (!tasks_archive_done(t, cwd)) return false;
 
     char dir[700], path[700];
     snprintf(dir, sizeof(dir), "%s/.berth", cwd);
@@ -116,7 +198,7 @@ bool tasks_save(const TaskList *t, const char *cwd)
     fclose(f);
     if (rename(tmp, path) != 0) return false;
     // Своя запись — не повод перечитывать.
-    ((TaskList *)t)->mtime = file_mtime(path);
+    t->mtime = file_mtime(path);
     return true;
 }
 

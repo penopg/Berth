@@ -10,6 +10,7 @@
 #include "utf8.h"
 #include "skills_builtin.h"
 #include "actions.h"
+#include "timers.h"
 
 // Состояние вывода на время одного кадра: где рисуем, чем и что уже нажали.
 typedef struct {
@@ -244,6 +245,9 @@ static bool toggle(Ctx *c, bool on)
     ui_text_clipped(c->font, word, r.x + w + c->font->cell_width, c->y + 6,
                     on ? c->theme->row_text : c->theme->row_text_dim, c->font->cell_width * 5);
     c->row_x = r.x + w + c->font->cell_width * 6;
+    // Как и у кнопки: без этого `setting_note` не сдвинет строку и напишет
+    // пояснение поверх тумблера.
+    c->row_used = true;
 
     Rect hit = { r.x, c->y, w + c->font->cell_width * 6, c->font->cell_height + 12 };
     return c->click && inside(hit, c->mouse) && visible_hit(c, c->mouse);
@@ -609,6 +613,18 @@ static struct {
     char ask_hint[512];            // чем берт дополнит просьбу — словами
     char ask_ctx[2048];            // чем дополнит на самом деле — агенту
 
+    // Выбор интеграции: что подключаем. Стоит перед карточкой нового
+    // проекта — у группы с видом «интеграции» «+» ведёт сюда.
+    bool picking;
+
+    // Подключение ящика: те же два поля, но спрашивают адрес и короткое имя,
+    // а не имя папки и описание. Папку берт назовёт сам, если имя не дали.
+    bool mail;
+    // Переименование в панели: одно поле с именем. rename_group — группа,
+    // а не проект: разница только в подписи карточки.
+    bool renaming;
+    bool rename_group;
+
     // Новый проект в группе: cwd — папка группы, group — её имя, notice —
     // отказ прошлой попытки (папка есть, имя плохое).
     bool project;
@@ -752,7 +768,7 @@ static void draw_tip(Ctx *c)
 
 static int edit_fields(void)
 {
-    if (g_edit.asking) return 1;
+    if (g_edit.asking || g_edit.renaming) return 1;
     return g_edit.action ? g_edit.ask_n : 2;
 }
 
@@ -882,9 +898,49 @@ void page_new_project_failed(const char *why)
     g_edit.cursor = (int)strlen(g_edit.title);
 }
 
+void page_integration_begin(const char *root, const char *group)
+{
+    edit_begin(root, -1, NULL);
+    g_edit.picking = true;
+    snprintf(g_edit.group, sizeof(g_edit.group), "%s", group ? group : "");
+}
+
+void page_mail_begin(const char *root, const char *group)
+{
+    edit_begin(root, -1, NULL);
+    g_edit.mail = true;
+    snprintf(g_edit.group, sizeof(g_edit.group), "%s", group ? group : "");
+}
+
+void page_rename_begin(const char *path, const char *current, bool group)
+{
+    edit_begin(path, -1, NULL);
+    g_edit.renaming = true;
+    g_edit.rename_group = group;
+    snprintf(g_edit.title, sizeof(g_edit.title), "%s", current ? current : "");
+    g_edit.cursor = (int)strlen(g_edit.title);
+}
+
+void page_mail_failed(const char *why)
+{
+    char addr[TASK_TITLE_MAX], name[TASK_BODY_MAX];
+    char group[PROJECT_NAME_MAX], cwd[SESSION_PATH_MAX];
+    snprintf(addr,  sizeof(addr),  "%s", g_edit.title);
+    snprintf(name,  sizeof(name),  "%s", g_edit.body);
+    snprintf(group, sizeof(group), "%s", g_edit.group);
+    snprintf(cwd,   sizeof(cwd),   "%s", g_edit.cwd);
+    page_mail_begin(cwd, group);
+    snprintf(g_edit.title, sizeof(g_edit.title), "%s", addr);
+    snprintf(g_edit.body,  sizeof(g_edit.body),  "%s", name);
+    snprintf(g_edit.notice, sizeof(g_edit.notice), "%s", why ? why : "");
+    g_edit.cursor = (int)strlen(g_edit.title);
+}
+
 bool page_overlay_active(void)
 {
-    return g_edit.active && (g_edit.project || g_edit.asking);
+    return g_edit.active
+        && (g_edit.project || g_edit.asking || g_edit.picking || g_edit.mail
+            || g_edit.renaming);
 }
 
 static bool key_hit(int key)
@@ -959,9 +1015,14 @@ static int edit_keys(void)
             }
         } else if (g_edit.asking) {
             edit_insert("\n", 1);      // поле одно, и оно многострочное
+        } else if (g_edit.renaming) {
+            return 1;                  // поле одно и однострочное: Enter — готово
         } else if (g_edit.field == 0) {
             g_edit.field = 1;
             g_edit.cursor = (int)strlen(g_edit.body);
+        } else if (g_edit.mail) {
+            // У ящика оба поля однострочные: Enter со второго — «готово».
+            return 1;
         } else {
             edit_insert("\n", 1);
         }
@@ -997,7 +1058,13 @@ static void edit_field(Ctx *c, int field, char *buf, bool multiline,
     int inner_w = width - 16;
     Seg segs[SEG_MAX];
     int n = wrap_segments(c->font, buf, inner_w, segs, SEG_MAX);
-    int lines = multiline ? (n < 3 ? 3 : n) : 1;
+    // «Однострочное» — про то, что Enter уходит в соседнее поле, а не про
+    // одну строку на экране: значение бывает длиннее ширины (впечатление о
+    // фильме, название задачи), текст переносится и рисуется целиком —
+    // значит и коробка обязана расти вместе с ним, иначе хвост вылезает
+    // под кнопки.
+    int lines = n < 1 ? 1 : n;
+    if (multiline && lines < 3) lines = 3;
     Rect r = { x, c->y, width, c->line * lines + 12 };
     bool focused = g_edit.field == field;
 
@@ -1085,6 +1152,14 @@ static void draw_editor(Ctx *c, int indent)
     } else if (g_edit.action) {
         for (int i = 0; i < g_edit.ask_n; i++)
             edit_field(c, i, g_edit.answer[i], false, g_edit.ask[i], x, width);
+    } else if (g_edit.renaming) {
+        edit_field(c, 0, g_edit.title, false,
+                   "Имя в панели; пустое — снова имя папки", x, width);
+    } else if (g_edit.mail) {
+        // Оба поля однострочные: адрес и имя папки — по строке каждое.
+        edit_field(c, 0, g_edit.title, false, "Адрес ящика — ivan@company.com", x, width);
+        edit_field(c, 1, g_edit.body, false,
+                   "Как назвать — не обязательно, по умолчанию по домену", x, width);
     } else if (g_edit.project) {
         edit_field(c, 0, g_edit.title, false, "Имя папки проекта", x, width);
         edit_field(c, 1, g_edit.body, true, "О чём — одной строкой, попадёт в паспорт", x, width);
@@ -1152,12 +1227,34 @@ static void draw_editor(Ctx *c, int indent)
     if (action == 1) {
         rtrim_inplace(g_edit.title);
         rtrim_inplace(g_edit.body);
+        if (g_edit.renaming) {
+            // Пустое имя здесь — не ошибка, а «верни имя папки».
+            set_event(c, PAGE_EVENT_RENAME, g_edit.rename_group ? 1 : 0, NULL);
+            c->event.cwd = g_edit.cwd;
+            c->event.title = g_edit.title;
+            g_edit.active = false;
+            return;
+        }
         if (!g_edit.title[0]) {
             // Без названия задачи нет: нечего показывать в списке.
             g_edit.field = 0;
             return;
         }
-        if (g_edit.project) {
+        if (g_edit.mail) {
+            // Адрес проверяем здесь: карточка знает, что спрашивала, а
+            // ошибиться в нём легче всего — и без него дальше идти некуда.
+            const char *at = strchr(g_edit.title, '@');
+            if (!at || at == g_edit.title || !strchr(at, '.')) {
+                snprintf(g_edit.notice, sizeof(g_edit.notice),
+                         "Нужен адрес вида имя@домен");
+                g_edit.field = 0;
+                g_edit.cursor = (int)strlen(g_edit.title);
+                return;
+            }
+            for (char *q = g_edit.body; *q; q++) if (*q == '\n') *q = ' ';
+            set_event(c, PAGE_EVENT_NEW_MAILBOX, 0, g_edit.group);
+            c->event.cwd = g_edit.cwd;
+        } else if (g_edit.project) {
             for (char *q = g_edit.body; *q; q++) if (*q == '\n') *q = ' ';
             set_event(c, PAGE_EVENT_NEW_PROJECT, 0, g_edit.group);
             c->event.cwd = g_edit.cwd;
@@ -1537,8 +1634,23 @@ static void draw_tasks(Ctx *c, const Session *s, const TaskList *tl,
         reveal_task_once(c, cwd, sub, i, r.y);
     }
 
+    // Сделанные уехали в свой файл при записи. Строка нужна не ради счёта,
+    // а ради возврата: отметить сгоряча можно всегда, и должно быть чем
+    // открыть. Сам архив берт не разбирает — только считает заголовки.
+    if (tl->archived > 0) {
+        gap(c, 1);
+        char arch[64];
+        snprintf(arch, sizeof(arch), "Сделано · %d — в архиве", tl->archived);
+        text(c, arch, c->theme->row_text_dim);
+        row_begin(c);
+        c->row_x = c->x + indent;
+        if (button(c, "Открыть архив", false))
+            set_event(c, PAGE_EVENT_TODO_ARCHIVE_OPEN, 0, NULL);
+        row_end(c);
+    }
+
     if (tl->partial)
-        text(c, "…в файле есть ещё задачи, они не поместились", c->theme->row_text_dim);
+        text(c, "…в файле есть ещё задачи, они не поместились — правки списка не сохранятся", c->theme->row_text_dim);
 
     if (ghost_rect.w > 0)
         draw_ghost(c, &tl->items[g_drag.index], ghost_number, ghost_rect);
@@ -1567,6 +1679,14 @@ static bool section_toggle(Ctx *c, const char *title, bool open)
     return hover && c->click;
 }
 
+// Проект стоит на странице разделом: подпроект — по родителю, проект
+// группы — по имени группы у вкладки группы.
+static bool page_child_of(const ProjectList *projects, const Project *sub, const Session *s)
+{
+    if (s->group_tab) return sub->parent < 0 && !strcmp(sub->group, s->group);
+    return sub->parent >= 0 && !strcmp(projects->items[sub->parent].path, s->cwd);
+}
+
 // Задачи подпроектов — разделами под своими, свёрнутыми: у родителя они
 // нужны реже своих, а подпроектов бывает десяток. Состояние подпроекта
 // читается только у раскрытого: кэш набора невелик, и грузить все разом
@@ -1575,29 +1695,34 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
 {
     // Свой заголовок нужен даже когда подпроектов нет: без него «+ Новый
     // подпроект» висел под задачами и читался их кнопкой.
+    // У страницы группы «подпроекты» — её проекты: они в списке не дети
+    // папки, а члены группы, и находятся по имени группы.
+    bool grp = s->group_tab;
     int subs = 0;
-    for (int k = 0; projects && k < projects->count; k++) {
-        const Project *sub = &projects->items[k];
-        if (sub->parent >= 0 && !strcmp(projects->items[sub->parent].path, s->cwd)) subs++;
-    }
+    for (int k = 0; projects && k < projects->count; k++)
+        if (page_child_of(projects, &projects->items[k], s)) subs++;
     char head[64];
-    snprintf(head, sizeof(head), subs ? "Подпроекты · %d" : "Подпроекты", subs);
-    section_help(c, head, NULL,
-                 "Папки внутри проекта, где идёт своя работа: у них свой "
-                 "разговор с агентом, свои задачи и паспорт. Берт находит их "
-                 "по истории Claude Code, CLAUDE.md или .berth внутри; "
-                 "исключения — в .berth/subprojects.tsv.");
+    if (grp) snprintf(head, sizeof(head), subs ? "Проекты · %d" : "Проекты", subs);
+    else     snprintf(head, sizeof(head), subs ? "Подпроекты · %d" : "Подпроекты", subs);
+    section_help(c, head, NULL, grp
+                 ? "Проекты этой группы с их задачами. Разговор со страницы "
+                   "группы — для задачи, у которой проекта ещё нет: агент "
+                   "подберёт проект или заведёт новый."
+                 : "Папки внутри проекта, где идёт своя работа: у них свой "
+                   "разговор с агентом, свои задачи и паспорт. Берт находит их "
+                   "по истории Claude Code, CLAUDE.md или .berth внутри; "
+                   "исключения — в .berth/subprojects.tsv.");
 
     int q = 0;
     for (int k = 0; projects && k < projects->count; k++) {
         const Project *sub = &projects->items[k];
-        if (sub->parent < 0 || strcmp(projects->items[sub->parent].path, s->cwd)) continue;
+        if (!page_child_of(projects, sub, s)) continue;
         int idx = q++;
         if (idx >= 32) break;   // битов в page_subs_open
 
         bool open = (s->page_subs_open >> idx) & 1u;
         char prefix[PROJECT_NAME_MAX + 24];
-        snprintf(prefix, sizeof(prefix), "Подпроект %s", sub->name);
+        snprintf(prefix, sizeof(prefix), grp ? "%s" : "Подпроект %s", sub->name);
 
         char title[PROJECT_NAME_MAX + 64];
         const ProjectState *sst = open ? projstate_get(sub->path) : projstate_peek(sub->path);
@@ -1609,6 +1734,7 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
         if (!open || !sst) continue;
 
         draw_tasks(c, s, &sst->tasks, sub->path, idx);
+        if (grp) continue;   // проект группы убирается из панели, а не отсюда
         row_begin(c);
         if (button(c, "Убрать из проекта", false))
             set_event(c, PAGE_EVENT_HIDE_SUBPROJECT, idx, sub->name);
@@ -1623,9 +1749,9 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
     row_begin(c);
     // «Новый» заводит папку с паспортом — как newproj.sh, но внутри проекта.
     // «Добавить» — для папки, которая уже есть, но признаков не имеет.
-    if (button_kind(c, "+ Новый подпроект", BTN_QUIET))
+    if (button_kind(c, grp ? "+ Новый проект" : "+ Новый подпроект", BTN_QUIET))
         edit_begin_subproject(s->cwd);
-    if (button_kind(c, "+ Добавить подпроект", BTN_QUIET))
+    if (!grp && button_kind(c, "+ Добавить подпроект", BTN_QUIET))
         set_event(c, PAGE_EVENT_ADD_SUBPROJECT, 0, NULL);
     row_end(c);
 }
@@ -1657,6 +1783,37 @@ static void tables_of(const ProjectState *st, char *out, size_t cap)
                  out[0] ? ", " : "", st->tables[i].path);
 }
 
+// Давность коротко, минутами и часами: «обновлено 12 мин назад» — про
+// свежесть данных, а не про день, как у документов.
+static void age_short(time_t when, char *out, size_t cap)
+{
+    if (when <= 0) { snprintf(out, cap, "?"); return; }
+    long d = (long)(time(NULL) - when);
+    if (d < 60)         snprintf(out, cap, "только что");
+    else if (d < 3600)  snprintf(out, cap, "%ld мин назад", d / 60);
+    else if (d < 86400) snprintf(out, cap, "%ld ч назад", d / 3600);
+    else                snprintf(out, cap, "%ld дн. назад", d / 86400);
+}
+
+static void interval_text(int minutes, char *out, size_t cap)
+{
+    if (minutes < 60)           snprintf(out, cap, "%d мин", minutes);
+    else if (minutes % 60 == 0) snprintf(out, cap, "%d ч", minutes / 60);
+    else                        snprintf(out, cap, "%d ч %d мин", minutes / 60, minutes % 60);
+}
+
+// Интервал таймера у таблицы: из кнопки-команды, привязанной к ней.
+static int table_every(const ActionList *al, const Table *t)
+{
+    for (int i = 0; i < al->count; i++) {
+        const Action *a = &al->items[i];
+        if (a->scope == ACTION_TABLE && a->road == ROAD_CMD && a->every > 0
+            && !strcmp(a->target, t->path))
+            return a->every;
+    }
+    return 0;
+}
+
 static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *st)
 {
     const ActionList *al = &st->actions;
@@ -1686,7 +1843,8 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
     int hit = section_head(c, head, acts, 2,
                      "Кнопки над данными: клик собирает реплику из шаблона и "
                      "отправляет её агенту — задачей, если правка идёт в файл, "
-                     "или в разговор, если ответ надо прочитать. Стоят у записи "
+                     "или в разговор, если ответ надо прочитать; команда идёт "
+                     "без агента, берт запускает её сам. Стоят у записи "
                      "таблицы и у таблицы целиком. Живут в .berth/actions.tsv, "
                      "заводит и правит их агент по скиллу berth-actions.");
     if (hit == 1) set_event(c, PAGE_EVENT_ACTIONS_EDIT, 0, NULL);
@@ -1701,7 +1859,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
             snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx), "  «%s» — %s:%s · %s\n",
                      al->items[i].name,
                      al->items[i].scope == ACTION_ROW ? "запись" : "таблица",
-                     al->items[i].target, al->items[i].to_task ? "задача" : "разговор");
+                     al->items[i].target, action_road_name(&al->items[i]));
         if (!al->count) snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx), "  пока нет\n");
         snprintf(ctx + strlen(ctx), sizeof(ctx) - strlen(ctx),
                  "Таблицы проекта: %s\nФормат файла и правила — в скилле berth-actions.",
@@ -1773,10 +1931,10 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
         ui_text_clipped(c->font, quoted, c->x + indent, c->y, th->row_text, name_w * cw);
         ui_text_clipped(c->font, a->scope == ACTION_ROW ? "у записи" : "у таблицы",
                         col2, c->y, th->row_text_dim, where_w * cw);
-        // Дорога цветом: разговор акцентом — он заговорит с тобой; задача
-        // приглушённо — сделает молча.
-        ui_text_clipped(c->font, a->to_task ? "задача" : "разговор", col3, c->y,
-                        a->to_task ? th->row_text_dim : th->progress_fill, cw * 10);
+        // Дорога цветом: разговор акцентом — он заговорит с тобой; задача и
+        // команда приглушённо — сделают молча.
+        ui_text_clipped(c->font, action_road_name(a), col3, c->y,
+                        a->road == ROAD_TALK ? th->progress_fill : th->row_text_dim, cw * 10);
         c->y += c->line + SP_ROW;
 
         if (hover && c->click) set_event(c, PAGE_EVENT_ACTION_TOGGLE, i, NULL);
@@ -1786,11 +1944,28 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
         // вплотную к следующей строке и читалось её кнопкой.
         int block_top = c->y;
         char what[128];
-        snprintf(what, sizeof(what), "клик отправляет %s:",
-                 a->to_task ? "задачей, молча" : "репликой в разговор");
+        snprintf(what, sizeof(what), "клик %s:",
+                 a->road == ROAD_CMD ? "запускает из папки проекта, вывод в .berth/log"
+                 : a->to_task ? "отправляет задачей, молча" : "отправляет репликой в разговор");
         ui_text_clipped(c->font, what, c->x + indent + cw * 2, c->y, th->row_text_dim,
                         content_width(c) - indent - cw * 2);
         c->y += c->line;
+        // Таймер: раз в сколько и когда был последний запуск. Время — с этой
+        // машины (timers.tsv), поэтому «ещё не запускалось» честно про неё.
+        if (a->road == ROAD_CMD && a->every > 0) {
+            char per[32], when[48], line[128];
+            interval_text(a->every, per, sizeof(per));
+            time_t last = timers_last(s->cwd, a->name);
+            if (last > 0) {
+                struct tm tmv;
+                localtime_r(&last, &tmv);
+                snprintf(when, sizeof(when), "последний запуск %02d:%02d", tmv.tm_hour, tmv.tm_min);
+            } else snprintf(when, sizeof(when), "ещё не запускалось");
+            snprintf(line, sizeof(line), "сама каждые %s, %s", per, when);
+            ui_text_clipped(c->font, line, c->x + indent + cw * 2, c->y, th->row_text_dim,
+                            content_width(c) - indent - cw * 2);
+            c->y += c->line;
+        }
         body_text(c, a->text, indent + cw * 2, th->row_text);
         c->y += SP_ROW;
         row_begin(c);
@@ -1806,7 +1981,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
                      "Таблицы проекта: %s\n"
                      "Формат файла и правила — в скилле berth-actions.",
                      a->name, a->scope == ACTION_ROW ? "запись" : "таблица",
-                     a->target, a->to_task ? "задача" : "разговор", a->text,
+                     a->target, action_road_name(a), a->text,
                      tl[0] ? tl : "нет");
             char title[ACTION_NAME_MAX + 40];
             snprintf(title, sizeof(title), "Попросить агента · «%s»", a->name);
@@ -2215,7 +2390,15 @@ static void actions_buttons(Ctx *c, const Session *s, const ActionList *al,
     for (int i = 0; i < al->count; i++) {
         const Action *a = &al->items[i];
         if (a->scope != scope || strcmp(a->target, t->path)) continue;
-        if (!button(c, a->name, !a->to_task)) continue;
+        if (!button(c, a->name, a->road == ROAD_TALK)) continue;
+
+        // Команда уходит как есть: подстановок из ячеек у неё нет, текст
+        // письма в оболочку попадать не должен.
+        if (a->road == ROAD_CMD) {
+            set_event(c, PAGE_EVENT_ACTION_RUN, i, NULL);
+            c->event.prompt = a->text;
+            continue;
+        }
 
         const char *names[TABLE_COLS_MAX], *vals[TABLE_COLS_MAX];
         int n = 0;
@@ -2267,14 +2450,149 @@ static int cmp_rows(const void *pa, const void *pb)
     return g_sort_desc ? -r : r;
 }
 
+// Текст в одну-две строки: первая рвётся по последнему пробелу, что влез,
+// вторая обрезается многоточием — это список, а не раскрытая запись.
+// Возвращает число строк (0 у пустого текста, 1 или 2); с draw = false
+// только меряет.
+static int two_line_text(Ctx *c, const char *text, int x, int width, Color color,
+                         bool draw)
+{
+    const int cw = c->font->cell_width;
+    int fit = width / cw;
+    if (!text || !*text) return 0;   // пустая ячейка — этажа нет
+    if (fit < 4) {
+        if (draw) ui_text_clipped(c->font, text, x, c->y, color, width);
+        return 1;
+    }
+    if (chars_of(text) <= fit) {
+        if (draw) ui_text_clipped(c->font, text, x, c->y, color, width);
+        return 1;
+    }
+    // Место разрыва — байтовое смещение последнего пробела в пределах fit
+    // знаков; пробела нет — рвём по знакам.
+    int n = 0, cut = -1, at_fit = -1;
+    for (const char *p = text; *p; p++) {
+        if (((unsigned char)*p & 0xC0) == 0x80) continue;
+        if (n == fit) { at_fit = (int)(p - text); break; }
+        if (*p == ' ') cut = (int)(p - text);
+        n++;
+    }
+    if (cut <= 0) cut = at_fit;
+    if (draw) {
+        char first[TABLE_CELL_MAX];
+        snprintf(first, sizeof(first), "%.*s", cut, text);
+        ui_text_clipped(c->font, first, x, c->y, color, width);
+        const char *rest = text + cut;
+        while (*rest == ' ') rest++;
+        ui_text_clipped(c->font, rest, x, c->y + c->line, color, width);
+    }
+    return 2;
+}
+
+// Строки таблицы по списку номеров: одна и та же отрисовка для записей под
+// фильтром и для сложенных «Остальных» (те — приглушённо).
+static void table_rows(Ctx *c, const Session *s, const ActionList *al, const Table *t,
+                       int idx, const int *col, const int *w, int cols, bool two, int main,
+                       const int *list, int n, int open_row, bool dim)
+{
+    const int cw = c->font->cell_width;
+    const Theme *th = c->theme;
+    Color main_color = dim ? th->row_text_dim : th->row_text;
+    for (int k = 0; k < n; k++) {
+        int r = list[k];
+        bool open = r == open_row;
+        // Высота строки известна до отрисовки: у двухэтажной второй этаж —
+        // до двух строк текста, и hover-прямоугольник должен их накрывать.
+        int tail = two ? two_line_text(c, t->cells[r][main], c->x, content_width(c),
+                                       th->row_text_dim, false) : 0;
+        Rect rr = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * (1 + tail) + 4 };
+        bool hover = inside(rr, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) DrawRectangle(rr.x, rr.y, rr.w, rr.h, th->row_hover_bg);
+        int row_top = rr.y;
+
+        int x = c->x;
+        for (int k = 0; k < cols; k++) {
+            int i = col[k];
+            char v[TABLE_CELL_MAX];
+            table_cell_text(t->cells[r][i], v, sizeof(v));
+            int cell = w[k] * cw;
+            int tw = chars_of(v) * cw;
+            // Числа — по правому краю: так видно порядок величины.
+            int tx = (t->col_num[i] && tw < cell) ? x + cell - tw : x;
+            // В два этажа первая строка — кто и о чём, она полным цветом;
+            // текст под ней приглушённый, как превью письма в почтовом
+            // клиенте. В одну строку полным цветом только первая колонка.
+            ui_text_clipped(c->font, v, tx, c->y,
+                            (k == 0 || two) ? main_color : th->row_text_dim, cell);
+            x += cell + cw * 2;
+        }
+        c->y += c->line;
+        if (two) {
+            two_line_text(c, t->cells[r][main], c->x, content_width(c), th->row_text_dim, true);
+            c->y += c->line * tail;
+            // Отбивка между записями: без неё этажи соседних записей
+            // слипались в сплошной текст.
+            c->y += SP_HEAD;
+        }
+        if (hover && c->click) {
+            set_event(c, PAGE_EVENT_TABLE_ROW, idx, NULL);
+            c->event.arg2 = r;
+        }
+
+        // Раскрытая запись — все колонки, включая отброшенные справа: ради
+        // них клик и нужен.
+        if (open) {
+            c->y += SP_ROW;
+            for (int i = 0; i < t->col_count; i++) {
+                if (!t->cells[r][i][0]) continue;
+                char line_text[TABLE_CELL_MAX + 8];
+                snprintf(line_text, sizeof(line_text), "%s: ", t->cols[i]);
+                int lw = ui_text_clipped(c->font, line_text, c->x + cw * 2, c->y,
+                                         th->row_text_dim, content_width(c) - cw * 2);
+                const char *v = t->cells[r][i];
+                int vx = c->x + cw * 2 + lw;
+                int vw = content_width(c) - cw * 2 - lw;
+                // Значение переносится по словам с висячим отступом: во
+                // впечатлении бывает пара предложений, и обрезать их здесь
+                // некуда — раскрывают запись как раз ради них.
+                if (chars_of(v) * cw <= vw) {
+                    ui_text_clipped(c->font, v, vx, c->y, th->row_text, vw);
+                    c->y += c->line;
+                } else if (vw >= cw * 8) {
+                    draw_wrapped(c, v, vx, vw, th->row_text, true);
+                } else {
+                    // Подпись съела строку — значение идёт следующей.
+                    c->y += c->line;
+                    draw_wrapped(c, v, c->x + cw * 4, content_width(c) - cw * 4,
+                                 th->row_text, true);
+                }
+            }
+            if (actions_count(al, t, ACTION_ROW) > 0) {
+                row_begin(c);
+                c->row_x = c->x + cw * 2;
+                actions_buttons(c, s, al, t, r, ACTION_ROW);
+                row_end(c);
+            }
+            if (action_form_here(s, r)) draw_editor(c, cw * 2);
+            reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
+            gap(c, 1);
+        }
+    }
+}
+
 static void draw_table(Ctx *c, const Session *s, const ActionList *al,
                        const Table *t, int idx)
 {
     const int cw = c->font->cell_width;
     const Theme *th = c->theme;
 
-    char head[160];
-    if (t->exists)
+    char head[200];
+    if (t->exists && t->filter_col >= 0)
+        // Первым — сколько ждёт человека: ради этого числа фильтр и стоит.
+        snprintf(head, sizeof(head), "%s · %d %s · %d %s", t->name, t->pass_count,
+                 t->filter_label[0] ? t->filter_label : "под фильтром", t->file_rows,
+                 plural3(t->file_rows, "запись", "записи", "записей"));
+    else if (t->exists)
         snprintf(head, sizeof(head), "%s · %d %s", t->name, t->file_rows,
                  plural3(t->file_rows, "запись", "записи", "записей"));
     else
@@ -2292,21 +2610,71 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     // Ширина колонки — по содержимому, но не больше 24 знаков: одна длинная
     // заметка иначе съедает строку целиком. Колонки, не влезшие в ширину
     // раздела, отбрасываются справа — запись целиком открывается по клику.
+    // Главная колонка (с самым длинным текстом в среднем) в 24 знака не
+    // ограничена: ей достаётся всё, что осталось от узких. А если текст в
+    // ней длинный, запись идёт в два этажа — узкие колонки строкой, главная
+    // под ними во всю ширину, как список писем в почтовом клиенте.
     int avail = content_width(c) / cw;
     int col[TABLE_COLS_MAX], w[TABLE_COLS_MAX];
     int cols = 0, used = 0, chosen = 0;
+    int main = t->main_col;
+    bool main_shown = main >= 0 && t->col_show[main];
+
+    // Сколько заняли бы узкие сами по себе — от этого зависит, влезет ли
+    // главная в строку. Не влезает средняя ячейка — второй этаж; от 60
+    // знаков в среднем — второй этаж при любой ширине.
+    int narrow = 0;
+    for (int k = 0; k < t->col_count; k++) {
+        int i = t->col_order[k];
+        if (!t->col_show[i] || i == main) continue;
+        int cwid = t->col_chars[i];
+        if (cwid > 24) cwid = 24;
+        if (cwid < 3) cwid = 3;
+        narrow += cwid + 2;
+    }
+    bool two = main_shown && avail >= 40
+            && (t->col_avg[main] >= 60 || t->col_avg[main] > avail - narrow);
+
+    // В одну строку за главной держится место: хотя бы 16 знаков, иначе
+    // узкие съели бы строку, и главной досталось бы три.
+    int reserve = 0;
+    if (main_shown && !two) reserve = (t->col_chars[main] < 16 ? t->col_chars[main] : 16) + 2;
+    int main_k = -1;
     for (int k = 0; k < t->col_count; k++) {
         int i = t->col_order[k];   // порядок показа, а не порядок файла
         if (!t->col_show[i]) continue;
         chosen++;
+        if (i == main) {
+            if (two) continue;                 // пойдёт вторым этажом
+            col[cols] = i; w[cols] = 0; main_k = cols; cols++;   // ширина — остатком
+            continue;
+        }
         int cwid = t->col_chars[i];
         if (cwid > 24) cwid = 24;
         if (cwid < 3) cwid = 3;
-        if (cols > 0 && used + cwid > avail) continue;
+        if (cols > 0 && used + cwid + reserve > avail) continue;
         col[cols] = i;
         w[cols] = cwid;
         used += cwid + 2;
         cols++;
+    }
+    if (main_k >= 0) {
+        int rest = avail - used;
+        int mw = t->col_chars[main] < rest ? t->col_chars[main] : rest;
+        if (mw < 3) mw = 3;
+        w[main_k] = mw;
+        used += mw + 2;
+    } else if (two) {
+        // Главная ушла вниз, и первая строка свободна: остаток раздаётся
+        // обрезанным узким по порядку — тема письма дочитывается до конца.
+        int left = avail - used;
+        for (int k = 0; k < cols && left > 0; k++) {
+            int want = t->col_chars[col[k]] - w[k];
+            if (want <= 0) continue;
+            int add = want < left ? want : left;
+            w[k] += add;
+            left -= add;
+        }
     }
 
     // Выбор колонок: чипы по всем колонкам файла, выбранные акцентом.
@@ -2444,6 +2812,29 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
             }
             x += cell + cw * 2;
         }
+        if (two) {
+            // Заголовок главной — после узких: строки под ним нет, но
+            // сортировать по ней можно, как по остальным.
+            int room = content_width(c) - (x - c->x);
+            if (room >= cw * 4) {
+                Rect r = { x - 4, c->y - 3, room + 8, c->line + 4 };
+                bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+                if (hover) DrawRectangle(r.x, r.y, r.w, r.h, th->row_hover_bg);
+                bool active = main == sort_col;
+                if (active) {
+                    font_draw_codepoint(c->font, sort > 0 ? 0x25B4 : 0x25BE,
+                                        (float)x, (float)c->y,
+                                        (float)c->font->size, th->progress_fill);
+                }
+                ui_text_clipped(c->font, t->cols[main], x + (active ? cw : 0), c->y,
+                                active ? th->progress_fill : th->group_label,
+                                room - (active ? cw : 0));
+                if (hover && c->click) {
+                    set_event(c, PAGE_EVENT_TABLE_SORT, idx, NULL);
+                    c->event.arg2 = main;
+                }
+            }
+        }
         c->y += c->line;
         DrawRectangle(c->x, c->y - 3, content_width(c), 1, th->sidebar_border);
         c->y += 3;
@@ -2451,97 +2842,64 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
 
     // Порядок строк: показанный, а не файловый. Сортировка идёт по индексам,
     // сами ячейки не двигаются — файл принадлежит человеку.
-    static int order[TABLE_ROWS_MAX];
-    for (int i = 0; i < t->row_count; i++) order[i] = i;
+    // Под фильтром — те, что ждут человека; остальные складываются ниже.
+    static int order[TABLE_ROWS_MAX], rest[TABLE_ROWS_MAX];
+    int n_pass = 0, n_rest = 0;
+    for (int i = 0; i < t->row_count; i++) {
+        if (t->filter_col < 0 || t->row_pass[i]) order[n_pass++] = i;
+        else rest[n_rest++] = i;
+    }
     if (sort_col >= 0 && sort_col < t->col_count) {
         g_sort_table = t;
         g_sort_col = sort_col;
         g_sort_desc = sort < 0;
-        qsort(order, (size_t)t->row_count, sizeof(order[0]), cmp_rows);
+        if (n_pass) qsort(order, (size_t)n_pass, sizeof(order[0]), cmp_rows);
+        if (n_rest) qsort(rest, (size_t)n_rest, sizeof(rest[0]), cmp_rows);
     }
 
     bool all = (s->page_table_all >> idx) & 1u;
-    int limit = all ? t->row_count : (t->row_count < 8 ? t->row_count : 8);
+    int limit = all ? n_pass : (n_pass < 8 ? n_pass : 8);
     int open_row = s->page_table_row[idx] - 1;
 
-    for (int k = 0; k < limit; k++) {
-        int r = order[k];
-        bool open = r == open_row;
-        Rect rr = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 4 };
-        bool hover = inside(rr, c->mouse) && visible_hit(c, c->mouse);
-        if (hover) DrawRectangle(rr.x, rr.y, rr.w, rr.h, th->row_hover_bg);
-        int row_top = rr.y;
+    table_rows(c, s, al, t, idx, col, w, cols, two, main, order, limit, open_row, false);
 
-        int x = c->x;
-        for (int k = 0; k < cols; k++) {
-            int i = col[k];
-            const char *v = t->cells[r][i];
-            int cell = w[k] * cw;
-            int tw = chars_of(v) * cw;
-            // Числа — по правому краю: так видно порядок величины.
-            int tx = (t->col_num[i] && tw < cell) ? x + cell - tw : x;
-            ui_text_clipped(c->font, v, tx, c->y,
-                            k == 0 ? th->row_text : th->row_text_dim, cell);
-            x += cell + cw * 2;
-        }
-        c->y += c->line;
-        if (hover && c->click) {
-            set_event(c, PAGE_EVENT_TABLE_ROW, idx, NULL);
-            c->event.arg2 = r;
-        }
-
-        // Раскрытая запись — все колонки, включая отброшенные справа: ради
-        // них клик и нужен.
-        if (open) {
-            c->y += SP_ROW;
-            for (int i = 0; i < t->col_count; i++) {
-                if (!t->cells[r][i][0]) continue;
-                char line_text[TABLE_CELL_MAX + 8];
-                snprintf(line_text, sizeof(line_text), "%s: ", t->cols[i]);
-                int lw = ui_text_clipped(c->font, line_text, c->x + cw * 2, c->y,
-                                         th->row_text_dim, content_width(c) - cw * 2);
-                const char *v = t->cells[r][i];
-                int vx = c->x + cw * 2 + lw;
-                int vw = content_width(c) - cw * 2 - lw;
-                // Значение переносится по словам с висячим отступом: во
-                // впечатлении бывает пара предложений, и обрезать их здесь
-                // некуда — раскрывают запись как раз ради них.
-                if (chars_of(v) * cw <= vw) {
-                    ui_text_clipped(c->font, v, vx, c->y, th->row_text, vw);
-                    c->y += c->line;
-                } else if (vw >= cw * 8) {
-                    draw_wrapped(c, v, vx, vw, th->row_text, true);
-                } else {
-                    // Подпись съела строку — значение идёт следующей.
-                    c->y += c->line;
-                    draw_wrapped(c, v, c->x + cw * 4, content_width(c) - cw * 4,
-                                 th->row_text, true);
-                }
-            }
-            if (actions_count(al, t, ACTION_ROW) > 0) {
-                row_begin(c);
-                c->row_x = c->x + cw * 2;
-                actions_buttons(c, s, al, t, r, ACTION_ROW);
-                row_end(c);
-            }
-            if (action_form_here(s, r)) draw_editor(c, cw * 2);
-            reveal_task_once(c, s->cwd, -4 - idx, r, row_top);
-            gap(c, 1);
-        }
+    // Одни заголовки без строк — не ошибка, а таблица, которую ещё не
+    // заполнили (ящик до первого `обновить`). Без этой строки шапка над
+    // пустотой читалась как «не прочиталось».
+    if (t->row_count == 0)
+        text(c, "Записей пока нет", th->row_text_dim);
+    else if (t->filter_col >= 0 && n_pass == 0) {
+        // Под фильтром пусто — это и есть хорошая новость, её надо сказать.
+        char note[96];
+        snprintf(note, sizeof(note), "%s: 0 — всё разобрано",
+                 t->filter_label[0] ? t->filter_label : "под фильтром");
+        text(c, note, th->row_text_dim);
     }
 
     // Показ записей — не действие, а вид: складная строка под последней
     // записью, как «Сделано · N» у задач и дни в журнале. Кнопкой рядом с
     // «Подобрать» она читалась бы как такая же команда над данными.
-    if (t->row_count > 8) {
+    if (n_pass > 8) {
         char head[80];
         if (all)
             snprintf(head, sizeof(head), "Свернуть до восьми");
         else
-            snprintf(head, sizeof(head), "Ещё %d %s", t->row_count - limit,
-                     plural3(t->row_count - limit, "запись", "записи", "записей"));
+            snprintf(head, sizeof(head), "Ещё %d %s", n_pass - limit,
+                     plural3(n_pass - limit, "запись", "записи", "записей"));
         if (fold_row(c, head, NULL, all, th->row_text_dim))
             set_event(c, PAGE_EVENT_TABLE_ALL, idx, NULL);
+    }
+
+    // Сложенные фильтром — под своей складной строкой, приглушённо: они
+    // остаются в файле и в таблице, с глаз уходят, из архива нет.
+    if (n_rest > 0) {
+        bool rest_open = (s->page_table_rest >> idx) & 1u;
+        char head[80];
+        snprintf(head, sizeof(head), "Остальные · %d", n_rest);
+        if (fold_row(c, head, NULL, rest_open, th->row_text_dim))
+            set_event(c, PAGE_EVENT_TABLE_REST, idx, NULL);
+        if (rest_open)
+            table_rows(c, s, al, t, idx, col, w, cols, two, main, rest, n_rest, open_row, true);
     }
 
     // Действия — это уже про данные, поэтому своим рядом и кнопками. Тут же
@@ -2555,9 +2913,21 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     row_end(c);
     if (action_form_here(s, -1)) draw_editor(c, 0);
 
+    // Свежесть данных стоит у таблицы, а не в панели: человек смотрит на
+    // письма и должен видеть, насколько они свежие. Время — с файла,
+    // интервал — из кнопки-команды.
+    int every = table_every(al, t);
+    if (every > 0) {
+        char age[48], per[32], note[128];
+        age_short(t->mtime, age, sizeof(age));
+        interval_text(every, per, sizeof(per));
+        snprintf(note, sizeof(note), "обновлено %s · само раз в %s", age, per);
+        text(c, note, th->row_text_dim);
+    }
+
     if (t->file_rows > t->row_count) {
         char note[96];
-        snprintf(note, sizeof(note), "В файле ещё %d — на странице первые %d",
+        snprintf(note, sizeof(note), "В файле ещё %d — на странице последние %d",
                  t->file_rows - t->row_count, t->row_count);
         text(c, note, th->row_text_dim);
     }
@@ -2565,7 +2935,7 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     // Что не влезло в ширину, из списка выпало молча — об этом надо сказать,
     // иначе колонка выглядит потерянной. Скрытая настройкой — выбор
     // человека, о ней не напоминаем.
-    if (cols < chosen || t->wide)
+    if (cols + (two ? 1 : 0) < chosen || t->wide)
         text(c, "не все колонки влезли — клик по записи показывает её целиком",
              th->row_text_dim);
     else if (chosen < t->col_count)
@@ -3093,6 +3463,15 @@ static void setting_section(Ctx *c, const char *title)
 // известно только после отрисовки — на первом кадре подложка чуть короче.
 static int g_overlay_h;
 
+// Пункты карточки выбора идут столбцом, а не рядом: это список, из
+// которого выбирают одно, а не ряд равноправных кнопок.
+static void pick_break(Ctx *c)
+{
+    c->y += c->font->cell_height + 12 + 8;
+    c->row_x = c->x;
+    c->row_used = false;
+}
+
 PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
                             Rect view, Vector2 mouse)
 {
@@ -3107,6 +3486,9 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
         .font = font, .theme = theme, .view = card, .mouse = mouse,
         .click = IsMouseButtonPressed(MOUSE_BUTTON_LEFT),
         .x = card.x + PAD_X, .y = card.y + PAD_Y,
+        // Ряд кнопок начинается в колонке карточки, а не в нуле экрана:
+        // без этого первая кнопка рисовалась за её левым краем.
+        .row_x = card.x + PAD_X,
         // Ширина колонки: по ней меряется и переносится весь текст карточки.
         // Без неё content_width() отдаёт ноль, и подписи с контекстом просто
         // не рисуются — карточка выглядит пустой.
@@ -3128,6 +3510,66 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
     DrawRectangle(card.x, card.y, card.w, card.h, theme->term_bg);
     DrawRectangleLines(card.x, card.y, card.w, card.h, theme->group_label);
 
+    if (g_edit.picking) {
+        text(&c, "Новая интеграция", theme->row_text);
+        gap(&c, 1);
+
+        text(&c, "Почта", theme->row_text);
+        draw_wrapped(&c, "Подключите почту, чтобы разбирать письма агентом: заводить "
+                         "из них задачи и складывать вложения в документы проекта. "
+                         "Письма лягут в таблицу на странице ящика.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        gap(&c, 1);
+        draw_wrapped(&c, "Что нужно: почтовый клиент, в котором ящик уже настроен "
+                         "(Outlook или «Почта» macOS), либо пароль приложения для IMAP. "
+                         "Что подойдёт вашему ящику, агент выяснит при подключении — "
+                         "и спросит, если понадобится пароль.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        gap(&c, 1);
+
+        if (button_kind(&c, "Подключить почту", BTN_ACCENT)) {
+            // Дальше — карточка подключения: адрес и короткое имя. Поля
+            // читаем до edit_begin: он чистит g_edit целиком.
+            char root[SESSION_PATH_MAX], group[PROJECT_NAME_MAX];
+            snprintf(root, sizeof(root), "%s", g_edit.cwd);
+            snprintf(group, sizeof(group), "%s", g_edit.group);
+            page_mail_begin(root, group);
+            return c.event;
+        }
+        pick_break(&c);
+
+        gap(&c, 1);
+        // Чего ещё нет — строкой, а не рамками: пункт в рамке выглядит
+        // нажимаемым, а нажать его нельзя.
+        text(&c, "Скоро: календарь, Jira, Confluence", theme->row_text_dim);
+        gap(&c, 1);
+
+        // Где лежат проекты подключённого — свойство группы, а не ящика:
+        // ящик вне её папки в группу не попадёт. Показывается здесь, а не в
+        // настройках: сюда человек приходит ровно тогда, когда папка ему
+        // впервые важна.
+        char shown[SESSION_PATH_MAX + 16], home_buf[SESSION_PATH_MAX];
+        snprintf(shown, sizeof(shown), "Папка: %s",
+                 home_short(g_edit.cwd, home_buf, sizeof(home_buf)));
+        text(&c, shown, theme->row_text_dim);
+        if (button_kind(&c, "Изменить папку", BTN_QUIET))
+            set_event(&c, PAGE_EVENT_INTEGRATIONS_DIR, 0, g_edit.group);
+        pick_break(&c);
+        draw_wrapped(&c, "Сюда лягут проекты всего подключённого. Уже подключённые "
+                         "остаются где были: перенос папки оторвал бы их разговоры от истории.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        gap(&c, 1);
+
+        if (button_kind(&c, "Отмена", BTN_QUIET)) g_edit.active = false;
+        pick_break(&c);
+        if (IsKeyPressed(KEY_ESCAPE)) g_edit.active = false;
+
+        g_overlay_h = c.y - card.y + PAD_Y;
+        if (!g_edit.active) g_overlay_h = 0;
+        c.event.reveal = false;
+        return c.event;
+    }
+
     if (g_edit.asking) {
         // Что уйдёт вместе с просьбой — сказано механикой, а не выгрузкой
         // самих строк: человеку нужно знать, чего не надо пересказывать, а
@@ -3136,6 +3578,22 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
         gap(&c, 1);
         draw_wrapped(&c, g_edit.ask_hint, c.x, content_width(&c), theme->row_text_dim, true);
         gap(&c, 1);
+    } else if (g_edit.renaming) {
+        text(&c, g_edit.rename_group ? "Переименовать группу" : "Переименовать проект",
+             theme->row_text);
+        char short_buf[SESSION_PATH_MAX], where[SESSION_PATH_MAX + 16];
+        snprintf(where, sizeof(where), "Папка: %s",
+                 home_short(g_edit.cwd, short_buf, sizeof(short_buf)));
+        text(&c, where, theme->row_text_dim);
+        // Имя и папка — разные вещи: папку не трогаем, история Claude Code
+        // привязана к её пути.
+        text(&c, "Имя только для панели: папка на диске не меняется", theme->row_text_dim);
+    } else if (g_edit.mail) {
+        text(&c, "Подключение почты", theme->row_text);
+        draw_wrapped(&c, "Ящик станет проектом: письма в таблице, вложения в документах. "
+                         "Способ чтения агент подберёт сам и спросит, если понадобится пароль.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        if (g_edit.notice[0]) text(&c, g_edit.notice, theme->badge_dead);
     } else {
         char head[PROJECT_NAME_MAX + 32];
         snprintf(head, sizeof(head), "Новый проект · %s", g_edit.group);
@@ -3297,6 +3755,17 @@ PageEvent page_draw_settings(const Settings *st, const Groups *groups,
                  st->resume_within);
     else
         snprintf(line, sizeof(line), "Поднимаются все разговоры (resume_within = 0 в settings.conf).");
+    setting_note(&c, line);
+    setting_end(&c);
+
+    setting_begin(&c, "Забытые вкладки");
+    if (st->forget_after > 0)
+        snprintf(line, sizeof(line),
+                 "Вкладка без процесса, которую не открывали %d дн., закрывается сама и при запуске "
+                 "не поднимается; живой разговор не трогается (forget_after в settings.conf).",
+                 st->forget_after);
+    else
+        snprintf(line, sizeof(line), "Не закрываются (forget_after = 0 в settings.conf).");
     setting_note(&c, line);
     setting_end(&c);
 

@@ -191,7 +191,7 @@ static bool start_term(Session *s, const AgentProfile *agent,
         // Скиллы берта едут с каждым запуском claude: --add-dir на папку
         // пакета. Одно место на все пути запуска — страница, раскладка,
         // задачи, отправка задачи в новый разговор.
-        char full[1600];
+        char full[4096];
         claude_with_bundle(launch, full, sizeof(full));
         // Задача — это один процесс, а не оболочка с командой внутри: без
         // exec после `claude -p` оставалось приглашение, оболочка жила
@@ -237,6 +237,7 @@ int session_open(SessionList *list, const SessionOpts *opts)
 
     Session *s = &list->items[list->count];
     memset(s, 0, sizeof(*s));
+    s->seen_at = time(NULL);
     s->page_task_sub = -1;   // ноль — это первый подпроект, а не «свои»
 
     const char *cwd = opts->cwd;
@@ -491,6 +492,13 @@ void session_close_all(SessionList *list)
 void session_activate(SessionList *list, int index)
 {
     if (index < 0 || index >= list->count) return;
+    // Обе вкладки — та, что была активной, и та, что становится, — видены
+    // сейчас: иначе вкладка, простоявшая активной три дня, забылась бы
+    // сразу после переключения с неё.
+    time_t now = time(NULL);
+    if (list->active >= 0 && list->active < list->count)
+        list->items[list->active].seen_at = now;
+    list->items[index].seen_at = now;
     list->active = index;
 }
 
@@ -502,7 +510,7 @@ bool session_save_layout(const SessionList *list, const char *path, const char *
     FILE *f = fopen(path, "w");
     if (!f) return false;
 
-    fprintf(f, "# раскладка вкладок berth: каталог, агент, активная, вид, сессия\n");
+    fprintf(f, "# раскладка вкладок berth: каталог, агент, активная, вид, сессия, когда открывали\n");
     if (extra && *extra) fputs(extra, f);
     for (int i = 0; i < list->count; i++) {
         const Session *s = &list->items[i];
@@ -516,8 +524,10 @@ bool session_save_layout(const SessionList *list, const char *path, const char *
             : "term";
         // Диалог вкладки пишем последним полем: без него вкладка после
         // перезапуска выбирает сессию заново и попадает в чужую.
-        fprintf(f, "%s\t%s\t%d\t%s\t%s\n", s->cwd, s->agent->id,
-                i == list->active ? 1 : 0, kind, s->session_id);
+        // Активная видена сейчас: на неё смотрят.
+        long seen = (long)(i == list->active ? time(NULL) : s->seen_at);
+        fprintf(f, "%s\t%s\t%d\t%s\t%s\t%ld\n", s->cwd, s->agent->id,
+                i == list->active ? 1 : 0, kind, s->session_id, seen);
     }
 
     fclose(f);

@@ -27,6 +27,9 @@
 #include "ui.h"
 #include "usage.h"
 #include "groups.h"
+#include "integrations.h"
+#include "timers.h"
+#include "pending.h"
 #include "subprojects.h"
 #include "skills.h"
 #include "xp.h"
@@ -399,7 +402,19 @@ static int open_tab_cmd(App *app, int project, const char *cwd,
         .cell_width = app->font.cell_width,
         .cell_height = app->font.cell_height,
     };
-    return session_open(&app->sessions, &opts);
+    int idx = session_open(&app->sessions, &opts);
+    if (idx < 0 && app->sessions.count >= SESSION_MAX) {
+        // Молчаливый отказ однажды выглядел как «проекты не открываются»:
+        // список был полон, а клик ничего не говорил.
+        fprintf(stderr, "berth: вкладок уже %d — предел\n", app->sessions.count);
+        if (app->sessions.active >= 0) {
+            Session *a = &app->sessions.items[app->sessions.active];
+            snprintf(a->page_notice, sizeof(a->page_notice),
+                     "Вкладок уже %d — предел; закройте лишние (⌘W или меню)",
+                     app->sessions.count);
+        }
+    }
+    return idx;
 }
 
 // « --model <x>» для служебной задачи или пустая строка: модель задач —
@@ -529,6 +544,7 @@ static const char *parent_path_of(const App *app, const char *cwd)
 static void resume_command(const char *cwd, const char *sid, char *out, size_t cap);
 static void reload_projects(App *app);
 static void save_layout(App *app);
+static void queue_prompt(Session *s, const char *prompt);
 
 // Отдать путь системе: папку — в Finder, файл — в редактор по умолчанию
 // (`open -t`). Двойной fork, чтобы не оставлять зомби: внука никто не ждёт.
@@ -552,19 +568,79 @@ static void open_external(const char *target, bool edit) {
     open_with(target, edit ? "-t" : NULL);
 }
 
+static void run_command_detached(const char *cwd, const char *cmd, const char *name);
+
+// Таймеры команд: пятое поле строки действия — раз в сколько минут
+// запускать её самой. Идут только у проектов из кэша (их открывали), только
+// пока берт работает и пока что-то происходит — тем же правилом, что запрос
+// лимитов. Время последнего запуска — в ~/.config/berth/timers.tsv, не в
+// проекте. Открыл страницу ящика после долгой паузы — первый же опрос
+// запустит просроченное.
+static void tick_timers(void)
+{
+    time_t now = time(NULL);
+    for (int i = 0; i < PROJSTATE_MAX; i++) {
+        const ProjectState *st = projstate_cached(i);
+        if (!st) continue;
+        for (int k = 0; k < st->actions.count; k++) {
+            const Action *a = &st->actions.items[k];
+            if (a->road != ROAD_CMD || a->every <= 0) continue;
+            time_t last = timers_last(st->cwd, a->name);
+            if (last > 0 && now - last < (time_t)a->every * 60) continue;
+            timers_mark(st->cwd, a->name, now);
+            run_command_detached(st->cwd, a->text, a->name);
+        }
+    }
+}
+
+// Дорога «команда» у действия: `sh -c` из корня проекта, отвязанно, вывод
+// в `.berth/log/<имя кнопки>.log` с меткой времени. Берт в данные не пишет
+// и здесь: пишет команда, таблицу он перечитает по mtime. Двойной fork,
+// внука никто не ждёт.
+static void run_command_detached(const char *cwd, const char *cmd, const char *name)
+{
+    char logdir[PROJECT_PATH_MAX], logp[PROJECT_PATH_MAX + 80];
+    snprintf(logdir, sizeof(logdir), "%s/.berth/log", cwd);
+    mkdir(logdir, 0755);
+    char safe[ACTION_NAME_MAX];
+    snprintf(safe, sizeof(safe), "%s", name && *name ? name : "команда");
+    for (char *p = safe; *p; p++) if (*p == '/') *p = '_';
+    snprintf(logp, sizeof(logp), "%s/%s.log", logdir, safe);
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            if (chdir(cwd) != 0) _exit(126);
+            int fd = open(logp, O_WRONLY | O_CREAT | O_APPEND, 0644);
+            if (fd >= 0) {
+                time_t now = time(NULL);
+                char head[160];
+                struct tm tmv;
+                localtime_r(&now, &tmv);
+                int n = snprintf(head, sizeof(head), "\n=== %04d-%02d-%02d %02d:%02d %s\n",
+                                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+                                 tmv.tm_hour, tmv.tm_min, cmd);
+                if (n > 0) write(fd, head, (size_t)(n < (int)sizeof(head) ? n : (int)sizeof(head)));
+                dup2(fd, 1);
+                dup2(fd, 2);
+                if (fd > 2) close(fd);
+            }
+            execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0) waitpid(pid, NULL, 0);
+}
+
 // Папка, в которой живут проекты группы. У группы-папки это она сама; у
 // группы из projects.json — родитель её проектов (все они лежат рядом:
 // так их генератор вкладок и находит).
 static bool group_root(const App *app, const char *group, char *out, size_t cap)
 {
-    for (int i = 0; i < app->groups.added_count; i++) {
-        const char *base = strrchr(app->groups.added[i], '/');
-        base = base ? base + 1 : app->groups.added[i];
-        if (!strcmp(base, group)) {
-            snprintf(out, cap, "%s", app->groups.added[i]);
-            return true;
-        }
-    }
+    // По имени в панели, а не по последнему звену пути: группу могли
+    // переименовать, и имя с папкой уже не совпадает.
+    if (groups_dir_of(&app->groups, group, out, cap)) return true;
     for (int i = 0; i < app->projects.count; i++) {
         const Project *p = &app->projects.items[i];
         if (p->parent >= 0 || strcmp(p->group, group)) continue;
@@ -577,11 +653,192 @@ static bool group_root(const App *app, const char *group, char *out, size_t cap)
     return false;
 }
 
+// Группа, чья папка — `dir`, либо false. Обратная сторона group_root: нужна
+// при восстановлении раскладки, где от вкладки остался только каталог.
+static bool group_by_root(const App *app, const char *dir, char *out, size_t cap)
+{
+    char root[PROJECT_PATH_MAX];
+    for (int i = 0; i < app->projects.pinned_count; i++) {
+        const char *g = app->projects.pinned[i].name;
+        if (group_root(app, g, root, sizeof(root)) && !strcmp(root, dir)) {
+            snprintf(out, cap, "%s", g);
+            return true;
+        }
+    }
+    for (int i = 0; i < app->projects.count; i++) {
+        const Project *p = &app->projects.items[i];
+        if (p->parent >= 0 || !p->group[0]) continue;
+        bool seen = false;   // группа уже проверена по более раннему проекту
+        for (int j = 0; j < i && !seen; j++)
+            seen = app->projects.items[j].parent < 0
+                && !strcmp(app->projects.items[j].group, p->group);
+        if (seen) continue;
+        if (group_root(app, p->group, root, sizeof(root)) && !strcmp(root, dir)) {
+            snprintf(out, cap, "%s", p->group);
+            return true;
+        }
+    }
+    return false;
+}
+
+// Вкладка становится вкладкой папки группы: имя и группа — как в панели,
+// проекта нет. Так её находит заголовок группы, а «прочее» не берёт.
+static void mark_group_tab(Session *s, const char *group)
+{
+    s->group_tab = true;
+    snprintf(s->name, sizeof(s->name), "%s", group);
+    snprintf(s->group, sizeof(s->group), "%s", group);
+}
+
+// Страница группы: та же страница проекта, только у папки группы. Паспорт
+// группы в шапке, её проекты — разделами подпроектов, «Продолжить работу»
+// начинает разговор в папке группы — для задачи, у которой проекта ещё нет.
+// Вторая такая вкладка не заводится: как и у проекта, разговор один.
+static void open_group_page(App *app, const char *group)
+{
+    for (int i = 0; i < app->sessions.count; i++) {
+        Session *s = &app->sessions.items[i];
+        if (!s->group_tab || s->role != SESSION_ROLE_MAIN || strcmp(s->group, group)) continue;
+        session_activate(&app->sessions, i);
+        if (session_has_term(s) && !s->show_page) toggle_project_page(app, s);
+        return;
+    }
+    char root[PROJECT_PATH_MAX];
+    if (!group_root(app, group, root, sizeof(root))) return;
+    int idx = open_tab(app, -1, root, agent_by_id(app->settings.default_agent),
+                       SESSION_KIND_PAGE, SESSION_PAGE_PROJECT);
+    if (idx < 0) return;
+    mark_group_tab(&app->sessions.items[idx], group);
+    resize_all(app);
+    save_layout(app);
+}
+
 static bool is_folder_group(const App *app, const char *root)
 {
     for (int i = 0; i < app->groups.added_count; i++)
         if (!strcmp(app->groups.added[i], root)) return true;
     return false;
+}
+
+// Заведённый бертом проект обязан быть виден: строка «убран из списка» с тем
+// же путём остаётся от прошлой папки с тем же именем (удалили в Finder,
+// завели заново — так пропал в «прочее» второй ящик почты). Создать — это и
+// есть «покажи».
+static void project_unhide(App *app, const char *dir)
+{
+    groups_unhide_project(&app->groups, dir);
+    groups_save(&app->groups);
+}
+
+// Убрать проект из списка. Папку не трогаем вовсе — это то же скрытие, что
+// у группы, только поштучное: на диске ничего не меняется, вернуть можно на
+// экране настроек. Разговор при этом гасим: «убрать с глаз» и «оставить
+// висеть в „прочем"» — разные вещи, и второе выглядело бы поломкой.
+//
+// У подпроекта своя дорога: он прячется файлом исключений родителя
+// (`.berth/subprojects.tsv`), тем же, каким его прячет «Убрать из проекта»
+// на странице. Двух механизмов на одну сущность быть не должно.
+static void project_hide(App *app, const char *path)
+{
+    if (!path || !*path) return;
+
+    for (int i = app->sessions.count - 1; i >= 0; i--)
+        if (!strcmp(app->sessions.items[i].cwd, path))
+            session_close(&app->sessions, i);
+
+    int idx = projects_find_by_path(&app->projects, path);
+    int par = (idx >= 0) ? app->projects.items[idx].parent : -1;
+    if (par >= 0 && par < app->projects.count) {
+        const char *name = strrchr(path, '/');
+        subprojects_hide(app->projects.items[par].path, name ? name + 1 : path);
+    } else {
+        groups_hide_project(&app->groups, path);
+        groups_save(&app->groups);
+    }
+
+    reload_projects(app);
+    resize_all(app);
+    save_layout(app);
+}
+
+// Группа «Интеграции» заводится сама и стоит в панели пустой. Подключить
+// почту человек должен уметь до того, как узнает, куда такое кладут: пустая
+// строка в панели говорит, что такое бывает, а кнопка на экране настроек,
+// куда никто не ходит, не говорит ничего.
+//
+// Заводится один раз: признак — группа такого вида уже есть в `groups.tsv`,
+// и скрытие крестиком её не стирает. Скрытую не возвращаем — «убрал» значит
+// убрал, вернуть можно выбором той же папки.
+static void integrations_ensure(Groups *g)
+{
+    const char *dir = config_dir();
+    if (!dir || groups_has_kind(g, GROUP_KIND_INTEGRATIONS)) return;
+    if (groups_is_hidden(g, "Интеграции")) return;
+
+    char path[PROJECT_PATH_MAX];
+    snprintf(path, sizeof(path), "%s/Интеграции", dir);
+    struct stat st;
+    if (stat(path, &st) != 0 && mkdir(path, 0755) != 0) return;
+    if (groups_add_kind(g, path, GROUP_KIND_INTEGRATIONS, NULL, 0))
+        groups_save(g);
+}
+
+// Список групп из projects.json пишет генератор вкладок, а не берт: завели
+// или убрали папку — просим его перечитать диск. Отвязанным процессом,
+// потому что берт подхватит файл по mtime и ждать его незачем.
+static void regen_projects_json(void)
+{
+    const char *home = getenv("HOME");
+    char gen[PROJECT_PATH_MAX];
+    snprintf(gen, sizeof(gen), "%s/.claude/warp-tabs/gen.sh", home ? home : "");
+    pid_t pid = fork();
+    if (pid == 0) {
+        if (fork() == 0) {
+            execl("/bin/bash", "bash", gen, (char *)NULL);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (pid > 0) waitpid(pid, NULL, 0);
+}
+
+// Корни групп под присмотром: новая подпапка в ~/personal или в папке
+// группы — новый проект, и заводит её не только карточка «+», но и агент
+// (mkdir из разговора). Меняется mtime корня — группе из projects.json
+// перезапускается генератор вкладок, группе-папке перечитывается список.
+// mtime корня меняет и файл в нём, поэтому не чаще раза в полминуты.
+#define ROOT_WATCH_MAX 32
+static void watch_group_roots(App *app)
+{
+    static char   roots[ROOT_WATCH_MAX][PROJECT_PATH_MAX];
+    static time_t seen[ROOT_WATCH_MAX];
+    static int    n = 0;
+    static time_t last_regen = 0;
+    time_t now = time(NULL);
+    if (now - last_regen < 30) return;
+
+    bool regen = false, reload = false;
+    for (int i = 0; i < app->projects.count; i++) {
+        const Project *p = &app->projects.items[i];
+        if (p->parent >= 0 || !p->group[0]) continue;
+        char root[PROJECT_PATH_MAX];
+        if (!group_root(app, p->group, root, sizeof(root))) continue;
+        int k = 0;
+        while (k < n && strcmp(roots[k], root)) k++;
+        struct stat st;
+        if (stat(root, &st) != 0) continue;
+        if (k == n) {
+            if (n >= ROOT_WATCH_MAX) continue;
+            snprintf(roots[n], sizeof(roots[n]), "%s", root);
+            seen[n++] = st.st_mtime;      // впервые видим — запоминаем, не дёргаем
+            continue;
+        }
+        if (st.st_mtime == seen[k]) continue;
+        seen[k] = st.st_mtime;
+        if (is_folder_group(app, root)) reload = true; else regen = true;
+    }
+    if (regen) { regen_projects_json(); last_regen = now; }
+    if (reload) reload_projects(app);
 }
 
 // Новый проект в группе: папка с паспортом по шаблону, как у подпроекта.
@@ -592,28 +849,25 @@ static void handle_new_project(App *app, PageEvent ev)
 {
     if (!ev.cwd || !ev.title) return;
     char err[200];
-    if (!subprojects_create(ev.cwd, ev.title, ev.body, err, sizeof(err))) {
-        page_new_project_failed(err);
-        return;
-    }
     char dir[PROJECT_PATH_MAX];
     snprintf(dir, sizeof(dir), "%s/%s", ev.cwd, ev.title);
+    // Папка уже есть — это не отказ, а «подключи»: агент заводит папки с
+    // паспортом сам (так появилась «Мои прототипы и сайты»), и человек с
+    // карточкой упирался в «уже есть», не имея другого способа.
+    bool adopted = false;
+    if (!subprojects_create(ev.cwd, ev.title, ev.body, err, sizeof(err))) {
+        struct stat st;
+        if (stat(dir, &st) != 0 || !S_ISDIR(st.st_mode)
+            || !subprojects_adopt(ev.cwd, ev.title, ev.body, err, sizeof(err))) {
+            page_new_project_failed(err);
+            return;
+        }
+        adopted = true;
+    }
+    project_unhide(app, dir);
 
     bool folder = is_folder_group(app, ev.cwd);
-    if (!folder) {
-        const char *home = getenv("HOME");
-        char gen[PROJECT_PATH_MAX];
-        snprintf(gen, sizeof(gen), "%s/.claude/warp-tabs/gen.sh", home ? home : "");
-        pid_t pid = fork();
-        if (pid == 0) {
-            if (fork() == 0) {
-                execl("/bin/bash", "bash", gen, (char *)NULL);
-                _exit(127);
-            }
-            _exit(0);
-        }
-        if (pid > 0) waitpid(pid, NULL, 0);
-    }
+    if (!folder) regen_projects_json();
 
     reload_projects(app);
     int idx = projects_find_by_path(&app->projects, dir);
@@ -622,10 +876,10 @@ static void handle_new_project(App *app, PageEvent ev)
     if (tab >= 0) {
         session_activate(&app->sessions, tab);
         Session *s = &app->sessions.items[tab];
-        snprintf(s->page_notice, sizeof(s->page_notice),
-                 folder ? "Проект «%s» заведён, паспорт в CLAUDE.md"
-                        : "Проект «%s» заведён, паспорт в CLAUDE.md; список проектов обновится через несколько секунд",
-                 ev.title);
+        snprintf(s->page_notice, sizeof(s->page_notice), "%s «%s» %s%s",
+                 adopted ? "Папка" : "Проект", ev.title,
+                 adopted ? "подключена" : "заведён, паспорт в CLAUDE.md",
+                 folder ? "" : "; список проектов обновится через несколько секунд");
     }
     save_layout(app);
 }
@@ -653,41 +907,209 @@ static void say_to_conversation(App *app, Session *s, const char *cwd,
         snprintf(s->page_notice, sizeof(s->page_notice),
                  "Разговор завершён — закройте его (⌘W) и отправьте задачу снова");
     } else {
-        // Разговора нет — запускаем и отдаём задачу первой репликой.
-        // Текст идёт через файл: в командной строке ему делать нечего —
-        // кавычки, переводы строк, апострофы.
-        char path[PROJECT_PATH_MAX];
-        snprintf(path, sizeof(path), "%s/prompt.txt", config_dir());
-        FILE *f = fopen(path, "w");
-        if (!f) {
-            snprintf(s->page_notice, sizeof(s->page_notice),
-                     "Не удалось записать %s", path);
-            return;
-        }
-        fputs(prompt, f);
-        fclose(f);
-
+        // Разговора нет — запускаем его и ставим реплику в очередь: она
+        // уйдёт вставкой, когда агент будет готов (`flush_pending_prompts`).
+        // Аргументом командной строки её отдавать нельзя: в незнакомой папке
+        // Claude Code сначала спрашивает про доверие, и промпт теряется.
         const AgentProfile *agent = agent_by_id("claude");
         char resume[256] = "";
         if (agent->has_history && agent->has_history(cwd) && agent->resume_command)
             agent->resume_command(cwd, resume, sizeof(resume));
-        char cmd[PROJECT_PATH_MAX + 300];
-        snprintf(cmd, sizeof(cmd), "%s \"$(cat '%s')\"",
-                 resume[0] ? resume : agent->launch, path);
+
         if (target) {
             session_start_term(target, agent, cols, rows,
                                app->font.cell_width, app->font.cell_height,
-                               NULL, cmd);
+                               NULL, resume[0] ? resume : NULL);
+            queue_prompt(target, prompt);
             if (main >= 0) session_activate(&app->sessions, main);
         } else {
             // Разговор подпроекта — своя вкладка: у него своя история.
             int idx = open_tab_cmd(app, projects_find_by_path(&app->projects, cwd),
                                    cwd, agent, SESSION_KIND_TERM,
-                                   SESSION_PAGE_PROJECT, cmd);
-            if (idx >= 0) session_activate(&app->sessions, idx);
+                                   SESSION_PAGE_PROJECT, resume[0] ? resume : NULL);
+            if (idx >= 0) {
+                queue_prompt(&app->sessions.items[idx], prompt);
+                session_activate(&app->sessions, idx);
+            }
             resize_all(app);
         }
     }
+    save_layout(app);
+}
+
+// Отложенная реплика уходит, когда агент готов её принять. Признак
+// готовности — обычный интерфейс Claude Code на экране: внизу подсказка
+// («? for shortcuts» или «shift+tab»), и нет вопроса про доверие к папке.
+//
+// Повод: первое подключение ящика. Промпт шёл аргументом командной строки,
+// Claude Code в незнакомой папке показал «Do you trust the files in this
+// folder?», человек ответил «да» — и открылся чистый разговор без реплики,
+// а сессия в истории даже не завелась. Та же дыра была у «Отправить в
+// работу» в проекте, где `claude` ни разу не запускали.
+//
+// Экран смотрим не каждый кадр, а раз в полсекунды: снимок стоит как кадр
+// без рисования. Не дождались за две минуты — отправляем как есть: реплика,
+// съеденная ожиданием, хуже реплики не в тот момент.
+static void flush_pending_prompts(App *app)
+{
+    double now = GetTime();
+    for (int i = 0; i < app->sessions.count; i++) {
+        Session *s = &app->sessions.items[i];
+        if (!s->pending_prompt[0]) continue;
+        if (!session_has_term(s) || !term_alive(&s->term)) {
+            s->pending_prompt[0] = '\0';
+            continue;
+        }
+        if (now < s->pending_at) continue;
+
+        bool ready = !term_screen_has(&s->term, "trust")
+                  && (term_screen_has(&s->term, "shortcuts")
+                      || term_screen_has(&s->term, "shift+tab"));
+        if (!ready && now < s->pending_until) {
+            s->pending_at = now + 0.5;
+            continue;
+        }
+
+        term_paste(&s->term, s->pending_prompt, strlen(s->pending_prompt));
+        s->enter_due = now + 0.3;
+        s->pending_prompt[0] = '\0';
+    }
+}
+
+// Поставить реплику в очередь вкладке: уйдёт, когда агент будет готов.
+static void queue_prompt(Session *s, const char *prompt)
+{
+    snprintf(s->pending_prompt, sizeof(s->pending_prompt), "%s", prompt);
+    s->pending_at = GetTime() + 1.0;
+    s->pending_until = GetTime() + 120.0;
+}
+
+// Короткое имя ящика — папка проекта. Человек его называть не обязан:
+// у подключения и так довольно вопросов, а домен второго уровня отличает
+// ящики друг от друга лучше, чем локальная часть (у двух рабочих ящиков
+// она бывает одна и та же). corp.company.com → company, mts.ru → mts.
+static void mailbox_name(const char *addr, const char *given,
+                         char *out, size_t cap)
+{
+    if (given && *given) { snprintf(out, cap, "%s", given); return; }
+
+    const char *at = strchr(addr, '@');
+    const char *host = at ? at + 1 : addr;
+
+    // Предпоследний ярлык домена: последний — зона (.ru, .com).
+    const char *last = NULL, *prev = NULL;
+    for (const char *p = host; *p; p++)
+        if (*p == '.') { prev = last; last = p; }
+    const char *start = prev ? prev + 1 : host;
+    size_t n = last && last > start ? (size_t)(last - start) : strlen(start);
+    if (n >= cap) n = cap - 1;
+    memcpy(out, start, n);
+    out[n] = '\0';
+    if (!out[0]) snprintf(out, cap, "%s", "Почта");
+}
+
+// Подключение ящика: берт заводит проект и начинает разговор с готовой
+// репликой. Порядок способов, вопросы про пароль и проверку знает скилл
+// `berth-mail-connect` — берт только называет ящик и зовёт скилл.
+// Папка группы интеграций — из карточки выбора. Диалог модальный, как у
+// «Добавить группу». После смены карточка открывается заново уже с новой
+// папкой: человек нажал «Изменить» и должен увидеть, что изменилось.
+// Своё имя группы или проекта в панели. Только имя: папка на диске та же,
+// история Claude Code при ней. Пустое имя снимает переименование.
+static void handle_rename(App *app, PageEvent ev)
+{
+    if (!ev.cwd || !*ev.cwd) return;
+    if (!groups_set_name(&app->groups, ev.cwd, ev.title ? ev.title : "")) return;
+    groups_save(&app->groups);
+    reload_projects(app);
+}
+
+static void handle_integrations_dir(App *app)
+{
+    const char *home = getenv("HOME");
+    char dir[PROJECT_PATH_MAX], name[PROJECT_NAME_MAX];
+    if (!macos_choose_folder(home, "Папка для проектов интеграций: ящиков почты и того, что подключат дальше", dir, sizeof(dir))) return;
+    if (!groups_set_kind_dir(&app->groups, GROUP_KIND_INTEGRATIONS, dir, name, sizeof(name)))
+        return;
+    groups_save(&app->groups);
+    reload_projects(app);
+    page_integration_begin(dir, name);
+}
+
+static void handle_new_mailbox(App *app, PageEvent ev)
+{
+    if (!ev.cwd || !ev.title || !ev.title[0]) return;
+
+    char name[PROJECT_NAME_MAX];
+    mailbox_name(ev.title, ev.body, name, sizeof(name));
+
+    char about[240];
+    snprintf(about, sizeof(about), "Почтовый ящик %s", ev.title);
+
+    char err[200];
+    if (!subprojects_create(ev.cwd, name, about, err, sizeof(err))) {
+        // Имя вывели сами — про это и скажем: человеку иначе непонятно,
+        // почему «папка уже есть», если он ничего не набирал.
+        char why[280];
+        if (ev.body && ev.body[0]) snprintf(why, sizeof(why), "%s", err);
+        else snprintf(why, sizeof(why), "%s — задайте имя", err);
+        page_mail_failed(why);
+        return;
+    }
+
+    char dir[PROJECT_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", ev.cwd, name);
+
+    // Таблица писем, её показ на странице и строка в реестре — сразу, до
+    // разговора: страница ящика должна быть рабочей с первой минуты, а не
+    // после того, как агент вспомнит про неё. Заполнит её `mail.py
+    // обновить` — это наказ в реплике ниже.
+    if (!mailbox_scaffold(dir))
+        fprintf(stderr, "berth: не удалось заготовить таблицу писем в %s\n", dir);
+    project_unhide(app, dir);
+
+    reload_projects(app);
+    int idx = projects_find_by_path(&app->projects, dir);
+    int tab = open_tab(app, idx, dir, agent_by_id("claude"),
+                       SESSION_KIND_PAGE, SESSION_PAGE_PROJECT);
+    if (tab < 0) return;
+    session_activate(&app->sessions, tab);
+    resize_all(app);
+
+    static char prompt[2400];
+    snprintf(prompt, sizeof(prompt),
+             "Подключи почтовый ящик %s к этому проекту.\n"
+             "\n"
+             "Проект уже заведён: %s. Работай по скиллу berth-mail-connect — "
+             "в нём порядок: определить провайдера по домену, выбрать способ "
+             "чтения (сначала почтовый клиент, где ящик уже настроен, потом "
+             "IMAP, потом MCP), проверить, что письма читаются, и записать, "
+             "как подключился.\n"
+             "\n"
+             "Пароль сам не подставляй и не проси прислать текстом: если он "
+             "нужен, скажи, какую команду набрать мне, чтобы положить его в "
+             "связку ключей.\n"
+             "\n"
+             "Когда чтение заработает — покажи пять последних писем: дата, "
+             "от кого, тема. По ним я пойму, тот ли это ящик.\n"
+             "\n"
+             "Затем заполни таблицу писем: `python3 .berth/mail/mail.py "
+             "обновить --дней 7` (семь дней только в первый раз: дальше без "
+             "`--дней` команда продолжает с последней даты в таблице). Файл "
+             "`.berth/data/inbox.tsv` с заголовками уже заведён и показан на "
+             "странице проекта, кнопка «Обновить» над ним уже стоит — заводить "
+             "заново, переименовывать и добавлять другие кнопки не надо.",
+             ev.title, dir);
+
+    // История у новой папки пуста, продолжать нечего: запускаем разговор с
+    // чистого листа и ставим реплику в очередь. Она уйдёт вставкой, когда
+    // агент будет готов, — в новой папке он сначала спросит про доверие.
+    uint16_t cols, rows;
+    grid_for(app->layout.term, &app->font, &cols, &rows);
+    Session *s = &app->sessions.items[tab];
+    session_start_term(s, agent_by_id("claude"), cols, rows,
+                       app->font.cell_width, app->font.cell_height, NULL, NULL);
+    queue_prompt(s, prompt);
     save_layout(app);
 }
 
@@ -758,7 +1180,11 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         return;
 
     case PAGE_EVENT_NEW_PROJECT:
-        // Приходит не со страницы, а из карточки над окном — handle_new_project.
+    case PAGE_EVENT_NEW_MAILBOX:
+    case PAGE_EVENT_INTEGRATIONS_DIR:
+    case PAGE_EVENT_RENAME:
+        // Приходят не со страницы, а из карточки над окном — handle_new_project,
+        // handle_new_mailbox и handle_integrations_dir.
         return;
 
     case PAGE_EVENT_START_AGENT: {
@@ -1007,7 +1433,7 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
     case PAGE_EVENT_ADD_SUBPROJECT: {
         // Выбор начинается в папке проекта: подпроект лежит прямо в ней.
         char dir[PROJECT_PATH_MAX];
-        if (!macos_choose_folder(s->cwd, "Добавить подпроект", dir, sizeof(dir)))
+        if (!macos_choose_folder(s->cwd, "Папка внутри проекта, которая станет подпроектом", dir, sizeof(dir)))
             break;
         if (subprojects_add(s->cwd, dir)) {
             reload_projects(app);
@@ -1056,6 +1482,14 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
     case PAGE_EVENT_FILE_TOGGLE:
         s->page_file_open = (s->page_file_open == ev.arg + 1) ? 0 : ev.arg + 1;
         break;
+
+    case PAGE_EVENT_TODO_ARCHIVE_OPEN: {
+        const char *cwd = ev.cwd ? ev.cwd : s->cwd;
+        char target[PROJECT_PATH_MAX + 64];
+        snprintf(target, sizeof(target), "%s/%s", cwd, TASKS_DONE_FILE);
+        open_external(target, true);
+        break;
+    }
 
     case PAGE_EVENT_FILE_OPEN:
     case PAGE_EVENT_FILE_REVEAL: {
@@ -1123,12 +1557,23 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         s->page_table_all ^= 1u << ev.arg;
         break;
 
+    case PAGE_EVENT_TABLE_REST:
+        if (ev.arg < 0 || ev.arg >= FILES_SHOWN_MAX) break;
+        s->page_table_rest ^= 1u << ev.arg;
+        break;
+
     // Действие над данными: реплика уже собрана страницей — подстановки
     // из записи и ответы формы. Берту остаётся выбрать дорогу.
     case PAGE_EVENT_ACTION_RUN: {
         const ProjectState *st = projstate_peek(s->cwd);
         if (!st || ev.arg < 0 || ev.arg >= st->actions.count || !ev.prompt) break;
         const Action *a = &st->actions.items[ev.arg];
+        if (a->road == ROAD_CMD) {
+            run_command_detached(s->cwd, a->text, a->name);
+            snprintf(s->page_notice, sizeof(s->page_notice),
+                     "«%s»: запущено, вывод в .berth/log", a->name);
+            break;
+        }
         // К какой таблице кнопка прикреплена, знает берт — и говорит это
         // сам. В тексте действия таблицы может не быть вовсе («/watchlist-pick»),
         // и пока таблица была одна, это сходило с рук; со второй агенту
@@ -1524,11 +1969,47 @@ static const char *groups_path(void)
     return path;
 }
 
+// Список проектов для агента: путь, имя в панели, группа. Разбор почты
+// раскладывает задачи по проектам, а откуда агенту знать, какие есть, —
+// projects.json принадлежит генератору вкладок, группы-папки в нём нет.
+// Свой файл берта, переписывается при каждом чтении списка.
+static void save_projects_snapshot(const App *app)
+{
+    const char *dir = config_dir();
+    if (!dir) return;
+    char path[PROJECT_PATH_MAX], tmp[PROJECT_PATH_MAX + 8];
+    snprintf(path, sizeof(path), "%s/projects.tsv", dir);
+    snprintf(tmp, sizeof(tmp), "%s.new", path);
+    FILE *f = fopen(tmp, "w");
+    if (!f) return;
+    fputs("# Проекты в панели берта: путь, имя, группа. Пишет берт, правки не переживут.\n", f);
+    for (int i = 0; i < app->projects.count; i++) {
+        const Project *p = &app->projects.items[i];
+        fprintf(f, "%s\t%s\t%s\n", p->path, p->name, p->group);
+    }
+    fclose(f);
+    rename(tmp, path);
+}
+
+// Число «ждёт человека» у каждого проекта — для панели. Кэш по каталогу,
+// один stat на проект, чтение только когда файл менялся.
+static void refresh_pending(App *app)
+{
+    for (int i = 0; i < app->projects.count; i++) {
+        Project *p = &app->projects.items[i];
+        p->pending = pending_get(p->path, p->pending_label, sizeof(p->pending_label));
+    }
+}
+
 static void reload_projects(App *app)
 {
     projects_load(&app->projects, projects_default_path());
     groups_apply(&app->groups, &app->projects);
     subprojects_apply(&app->projects);
+    // Свои имена — поверх всего списка: подпроекты появляются только сейчас.
+    groups_apply_names(&app->groups, &app->projects);
+    save_projects_snapshot(app);
+    refresh_pending(app);
 
     for (int i = 0; i < app->sessions.count; i++) {
         Session *s = &app->sessions.items[i];
@@ -1610,6 +2091,12 @@ static int restore_layout(App *app)
         if (!agent_id) continue;
         *agent_id++ = '\0';
 
+        // Папки может уже не быть: проект удалили из берта, из Finder или
+        // перенесли. Запускать процесс в несуществующем каталоге незачем —
+        // строка просто выпадает из раскладки при следующей записи.
+        struct stat st_dir;
+        if (stat(cwd, &st_dir) != 0 || !S_ISDIR(st_dir.st_mode)) continue;
+
         char *is_active = strchr(agent_id, '\t');
         if (is_active) *is_active++ = '\0';
 
@@ -1620,6 +2107,17 @@ static int restore_layout(App *app)
 
         char *sid = kind ? strchr(kind, '\t') : NULL;
         if (sid) *sid++ = '\0';
+
+        // Когда вкладку открывали — шестое поле. Файл прошлой версии его
+        // не содержит: тогда по времени последней работы в диалоге, а без
+        // неё — «сейчас», чтобы не забыть вкладку, о которой ничего не
+        // известно.
+        char *seen_s = sid ? strchr(sid, '\t') : NULL;
+        if (seen_s) *seen_s++ = '\0';
+        time_t now = time(NULL);
+        time_t seen_at = seen_s && *seen_s ? (time_t)atol(seen_s) : 0;
+        if (seen_at <= 0 && sid && *sid) seen_at = session_file_last_work(cwd, sid);
+        if (seen_at <= 0) seen_at = now;
 
         SessionKind sk = SESSION_KIND_TERM;
         SessionPageKind pk = SESSION_PAGE_PROJECT;
@@ -1657,10 +2155,31 @@ static int restore_layout(App *app)
             }
         }
 
+        // Вкладку без процесса, к которой давно не возвращались, не
+        // поднимаем вовсе: страницы копились до предела списка, и новый
+        // проект переставал открываться. Разговор, который поднимается
+        // процессом, под правило не подпадает — у него работа за сутки.
+        bool forgettable = (sk == SESSION_KIND_PAGE && pk == SESSION_PAGE_PROJECT)
+                        || (sk == SESSION_KIND_TERM && !agent_tab);
+        bool was_active = is_active && *is_active == '1';
+        if (forgettable && !was_active && app->settings.forget_after > 0
+            && now - seen_at > (time_t)app->settings.forget_after * 86400)
+            continue;
+
         int index = open_tab_cmd(app, projects_find_by_path(&app->projects, cwd),
                                  cwd, agent_by_id(agent_id), sk, pk,
                                  resume[0] ? resume : NULL);
         if (index < 0) continue;
+        app->sessions.items[index].seen_at = seen_at;
+        {
+            // Вкладка в папке группы — вкладка группы: иначе после
+            // перезапуска она встала бы в «прочее» под именем папки.
+            Session *rs = &app->sessions.items[index];
+            char gname[PROJECT_NAME_MAX];
+            if (rs->project < 0 && rs->role == SESSION_ROLE_MAIN
+                && group_by_root(app, cwd, gname, sizeof(gname)))
+                mark_group_tab(rs, gname);
+        }
         if (sid && *sid && sk == SESSION_KIND_PAGE)
             snprintf(app->sessions.items[index].session_id,
                      sizeof(app->sessions.items[index].session_id), "%s", sid);
@@ -1671,6 +2190,30 @@ static int restore_layout(App *app)
 
     if (active >= 0) session_activate(&app->sessions, active);
     return restored;
+}
+
+// Вкладки без процесса, которые не открывали forget_after дней, закрываются
+// сами: страница и оболочка ничего не держат, а место в списке — держат.
+// Живой разговор не трогаем: контекст дороже места. Активную — тоже: на
+// неё смотрят. Раз в десять секунд, с конца — session_close сдвигает список.
+static void forget_stale_tabs(App *app)
+{
+    static int frames = 0;
+    if (++frames < 600) return;
+    frames = 0;
+    if (app->settings.forget_after <= 0) return;
+    time_t now = time(NULL);
+    time_t limit = (time_t)app->settings.forget_after * 86400;
+    bool changed = false;
+    for (int i = app->sessions.count - 1; i >= 0; i--) {
+        Session *s = &app->sessions.items[i];
+        if (i == app->sessions.active || s->role != SESSION_ROLE_MAIN) continue;
+        if (session_has_term(s) || s->page != SESSION_PAGE_PROJECT) continue;
+        if (now - s->seen_at <= limit) continue;
+        session_close(&app->sessions, i);
+        changed = true;
+    }
+    if (changed) save_layout(app);
 }
 
 // Раскладку пишем не только при выходе: если терминал упадёт или его убьют,
@@ -1828,6 +2371,72 @@ static bool handle_panel_mouse(App *app)
         return true;
     }
 
+    // Меню съедает клик первым: пока оно открыто, панель под ним мыши не
+    // видит — иначе выбор пункта заодно переключал бы проект.
+    if (ui_menu_is_open()
+        && (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+            || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))) {
+        char cwd[PROJECT_PATH_MAX];
+        snprintf(cwd, sizeof(cwd), "%s", ui_menu_cwd());
+        switch (ui_menu_click(m, &app->font)) {
+        case UI_MENU_CLOSE_SESSION: {
+            for (int i = app->sessions.count - 1; i >= 0; i--)
+                if (!strcmp(app->sessions.items[i].cwd, cwd)
+                    && app->sessions.items[i].role == SESSION_ROLE_MAIN)
+                    session_close(&app->sessions, i);
+            resize_all(app);
+            save_layout(app);
+            break;
+        }
+        case UI_MENU_REVEAL: open_with(cwd, "-R"); break;
+        case UI_MENU_HIDE:   project_hide(app, cwd); break;
+        case UI_MENU_RENAME: {
+            if (ui_menu_is_group()) {
+                page_rename_begin(cwd, ui_menu_label(), true);
+            } else {
+                int idx = projects_find_by_path(&app->projects, cwd);
+                const char *cur = idx >= 0 ? app->projects.items[idx].name
+                                           : strrchr(cwd, '/');
+                if (idx < 0 && cur) cur++;
+                page_rename_begin(cwd, cur ? cur : "", false);
+            }
+            break;
+        }
+        default: break;
+        }
+        return true;
+    }
+
+    // Правый щелчок по строке проекта — контекстное меню. Редкое живёт
+    // здесь, а не разделом на странице.
+    if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT)) {
+        const PanelRow *row = layout_hit_row(&app->layout, m);
+        if (row && row->kind == PANEL_ROW_ITEM) {
+            const char *cwd = row->session >= 0
+                            ? app->sessions.items[row->session].cwd
+                            : (row->project >= 0
+                               ? app->projects.items[row->project].path : NULL);
+            if (cwd && *cwd) {
+                bool live = false;
+                for (int i = 0; i < app->sessions.count; i++)
+                    if (!strcmp(app->sessions.items[i].cwd, cwd)
+                        && app->sessions.items[i].role == SESSION_ROLE_MAIN)
+                        live = true;
+                ui_menu_open(cwd, live, m, &app->font);
+            }
+        } else if (row && row->kind == PANEL_ROW_GROUP
+                   && strcmp(row->label, "прочее") != 0) {
+            // У заголовка группы своё меню: переименовать (имя в панели —
+            // не имя папки) и показать папку. Переименовывается только
+            // группа-папка: у группы из projects.json имя пишет генератор.
+            char root[PROJECT_PATH_MAX] = "";
+            if (!group_root(app, row->label, root, sizeof(root))) root[0] = '\0';
+            ui_menu_open_group(row->label, root, is_folder_group(app, root),
+                               m, &app->font);
+        }
+        return true;
+    }
+
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         if (on_splitter) {
             app->splitter_dragging = true;
@@ -1840,7 +2449,7 @@ static bool handle_panel_mouse(App *app)
             // выбор папки и есть то, чем человек сейчас занят.
             const char *home = getenv("HOME");
             char dir[PROJECT_PATH_MAX];
-            if (macos_choose_folder(home, "Добавить группу", dir, sizeof(dir))) {
+            if (macos_choose_folder(home, "Папка-группа: её подпапки станут проектами", dir, sizeof(dir))) {
                 char name[PROJECT_NAME_MAX];
                 if (groups_add(&app->groups, dir, name, sizeof(name))) {
                     groups_save(&app->groups);
@@ -1855,17 +2464,35 @@ static bool handle_panel_mouse(App *app)
             bool real = strcmp(row->label, "прочее") != 0;
             bool on_x = real && m.x >= x.x && m.x < x.x + x.w;
             bool on_a = real && m.x >= a.x && m.x < a.x + a.w;
+            // Сворачивает стрелка в левом краю, как у подпроектов; клик по
+            // имени открывает страницу группы. «Прочее» — не группа, у него
+            // страницы нет, и клик по нему сворачивает по-прежнему.
+            Rect arrow = layout_row_expand_rect(row->rect, app->font.cell_width);
+            bool on_arrow = m.x < arrow.x + arrow.w;
             if (on_a) {
                 char root[PROJECT_PATH_MAX];
-                if (group_root(app, row->label, root, sizeof(root)))
-                    page_new_project_begin(root, row->label);
+                if (group_root(app, row->label, root, sizeof(root))) {
+                    // У группы интеграций «+» значит «подключить ещё одно»,
+                    // и спрашивать надо сначала что. Развилка по виду
+                    // группы, а не по её имени: имя папки переименуют.
+                    if (!strcmp(groups_kind_of(&app->groups, row->label),
+                                GROUP_KIND_INTEGRATIONS))
+                        page_integration_begin(root, row->label);
+                    else
+                        page_new_project_begin(root, row->label);
+                }
             } else if (on_x) {
                 // Скрыть, а не удалить: на диске ничего не меняется, а
                 // вернуть можно на экране настроек.
                 groups_hide(&app->groups, row->label);
                 groups_save(&app->groups);
                 reload_projects(app);
-            } else {
+            } else if (real && !on_arrow) {
+                open_group_page(app, row->label);
+            } else if (row->count > 0 || row->hidden > 0) {
+                // Пустую группу не сворачиваем: сворачивать нечего, а
+                // свёрнутой она спрятала бы первый же заведённый в ней
+                // проект — и это читалось бы как «не создалось».
                 layout_set_group_collapsed(&app->layout, row->label, !row->collapsed);
                 save_layout(app);
             }
@@ -2047,6 +2674,7 @@ int main(int argc, char **argv)
         else
             demo_first[0] = '\0';
     }
+    integrations_ensure(&app.groups);
     projects_load(&app.projects, projects_default_path());
     groups_apply(&app.groups, &app.projects);
     layout_init(&app.layout, metrics_for(&app.font));
@@ -2057,6 +2685,9 @@ int main(int argc, char **argv)
     {
         char xp_path[PROJECT_PATH_MAX];
         snprintf(xp_path, sizeof(xp_path), "%s/xp.tsv", config_dir());
+        char timers_path[PROJECT_PATH_MAX];
+        snprintf(timers_path, sizeof(timers_path), "%s/timers.tsv", config_dir());
+        timers_init(timers_path);
         xp_init(xp_path);
     }
     layout_compute(&app.layout, &app.projects, &app.sessions,
@@ -2124,6 +2755,7 @@ int main(int argc, char **argv)
             }
             if (subprojects_changed(&app.projects))
                 reload_projects(&app);
+            watch_group_roots(&app);
 
             // Настройки правят и руками, файлом. Тем же способом и по той же
             // причине: требовать перезапуска ради размера шрифта — глупо.
@@ -2136,6 +2768,8 @@ int main(int argc, char **argv)
             // Задачи агент отмечает прямо в файле проекта — тем же опросом.
             projstate_poll();
             xp_flush_maybe();
+            if (GetTime() - app.last_activity < 600) tick_timers();
+            refresh_pending(&app);
 
             // Состояние вкладок — из реестра Claude Code, тем же опросом:
             // по нему панель пишет «работает», «ждёт», «зовёт».
@@ -2173,6 +2807,15 @@ int main(int argc, char **argv)
         if (app.sessions.count == 0) break;
 
         bool panel_took_mouse = handle_panel_mouse(&app);
+        if (app.sessions.count == 0) break;
+
+        // Мышь могла изменить списки: «Убрать из списка» закрывает сессии
+        // каталога и перечитывает проекты, «Закрыть разговор» гасит вкладку.
+        // Строки раскладки после этого держат индексы прежних списков, а
+        // панель ниже рисуется по ним же — так берт и падал в
+        // `session_subtitle` (SIGSEGV, 2026-09-09). Пересчёт стоит цикла по
+        // проектам, поэтому делаем его безусловно, а не по флажку «изменилось».
+        layout_compute(&app.layout, &app.projects, &app.sessions, win_w, win_h);
 
         Session *active = session_active(&app.sessions);
 
@@ -2224,6 +2867,9 @@ int main(int argc, char **argv)
 
         session_poll_all(&app.sessions);
         reap_tasks(&app);
+        forget_stale_tabs(&app);
+        term_reap_orphans();
+        flush_pending_prompts(&app);
 
         // Признаки работы: мышь, клавиши, колесо — человек за окном; агент
         // в состоянии «работает» — тратит лимит и без человека. Клавиши
@@ -2363,6 +3009,8 @@ int main(int argc, char **argv)
         ui_draw_topbar(&app.layout, &app.sessions, &app.usage, &app.font, &app.theme,
                        GetMousePosition());
 
+        ui_menu_draw(&app.font, &app.theme, GetMousePosition());
+
         EndDrawing();
 
         // Текстуры картинок Kitty освобождаем только после EndDrawing().
@@ -2372,6 +3020,12 @@ int main(int argc, char **argv)
             handle_page_event(&app, active, page_event);
         if (overlay_event.kind == PAGE_EVENT_NEW_PROJECT)
             handle_new_project(&app, overlay_event);
+        else if (overlay_event.kind == PAGE_EVENT_NEW_MAILBOX)
+            handle_new_mailbox(&app, overlay_event);
+        else if (overlay_event.kind == PAGE_EVENT_INTEGRATIONS_DIR)
+            handle_integrations_dir(&app);
+        else if (overlay_event.kind == PAGE_EVENT_RENAME)
+            handle_rename(&app, overlay_event);
         // Просьба из карточки — обычное событие страницы: она открывается
         // и поверх терминала, и поверх страницы, а исполняет её вкладка.
         else if (overlay_event.kind != PAGE_EVENT_NONE && active)

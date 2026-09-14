@@ -39,6 +39,9 @@ bool subprojects_add(const char *project, const char *dir);
 // шаблону системы вкладок (~/.claude/warp-tabs/template.md; без него —
 // короткий свой). Паспорт — это и признак для поиска, и то, что Claude Code
 // прочтёт вместе с паспортом родителя. При отказе err объясняет, почему.
+// Подключить существующую папку: паспорт — только если его нет.
+bool subprojects_adopt(const char *project, const char *name, const char *oneline,
+                       char *err, size_t err_cap);
 bool subprojects_create(const char *project, const char *name, const char *oneline,
                         char *err, size_t err_cap);
 

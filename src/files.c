@@ -80,6 +80,7 @@ static void shown_load(FileList *fl, const char *cwd)
 {
     fl->shown_count = 0;
     fl->cols_count = 0;
+    fl->filt_count = 0;
     char path[700];
     shown_path(cwd, path, sizeof(path));
     fl->shown_mtime = file_mtime(path);
@@ -91,6 +92,29 @@ static void shown_load(FileList *fl, const char *cwd)
         char *tab = strchr(line, '\t');
         if (!tab) continue;
         *tab = '\0';
+        if (!strcmp(line, "filter")) {
+            // filter<TAB>путь<TAB>колонка<TAB>пусто|не пусто<TAB>подпись
+            if (fl->filt_count >= FILES_FILTER_MAX) continue;
+            char *fld[4] = { 0 };
+            char *p = tab + 1;
+            for (int k = 0; k < 4 && p; k++) {
+                fld[k] = p;
+                p = strchr(p, '\t');
+                if (p) *p++ = '\0';
+            }
+            if (!fld[0] || !fld[1] || !fld[2]) continue;
+            int n = fl->filt_count;
+            const char *rel = fld[0];
+            if (!strncmp(rel, "./", 2)) rel += 2;
+            snprintf(fl->filt_path[n], FILE_PATH_MAX, "%s", rel);
+            snprintf(fl->filt_col[n], sizeof(fl->filt_col[n]), "%s", fld[1]);
+            snprintf(fl->filt_label[n], sizeof(fl->filt_label[n]), "%s", fld[3] ? fld[3] : "");
+            rtrim(fl->filt_path[n]); rtrim(fl->filt_col[n]); rtrim(fl->filt_label[n]);
+            rtrim(fld[2]);
+            fl->filt_empty[n] = strcmp(fld[2], "не пусто") != 0 && strcmp(fld[2], "nonempty") != 0;
+            if (fl->filt_path[n][0] && fl->filt_col[n][0]) fl->filt_count++;
+            continue;
+        }
         bool show = !strcmp(line, "show");
         if (!show && strcmp(line, "cols")) continue;
         char *p = tab + 1;
@@ -135,10 +159,22 @@ static bool shown_write(FileList *fl, const char *cwd)
     // Снятые со страницы таблицы помнят свой вид: строка cols без показа.
     for (int i = 0; i < fl->cols_count; i++)
         fprintf(f, "cols\t%s\t%s\n", fl->cols_path[i], fl->cols_spec[i]);
+    // Фильтры пишет агент или заготовка; берт их только проносит через
+    // перезапись — тумблер показа не должен их стирать.
+    for (int i = 0; i < fl->filt_count; i++)
+        fprintf(f, "filter\t%s\t%s\t%s\t%s\n", fl->filt_path[i], fl->filt_col[i],
+                fl->filt_empty[i] ? "пусто" : "не пусто", fl->filt_label[i]);
     fclose(f);
     if (rename(tmp, path) != 0) { remove(tmp); return false; }
     fl->shown_mtime = file_mtime(path);
     return true;
+}
+
+int files_filter_of(const FileList *fl, const char *rel)
+{
+    for (int i = 0; i < fl->filt_count; i++)
+        if (!strcmp(fl->filt_path[i], rel)) return i;
+    return -1;
 }
 
 bool files_is_table(const char *rel)

@@ -168,12 +168,31 @@ static void upper_utf8(char *dst, size_t cap, const char *src)
 // сверху больше межстрочной — чтобы группа читалась как раздел, а не как
 // ещё один проект тем же кеглем. Под заголовком тонкая черта цвета
 // первого проекта группы: единственное, что осталось от цветов Warp.
+static void draw_active_mark(Rect r, const Theme *th);
+
 static void draw_group_row(const PanelRow *row, const FontAtlas *f,
-                           const Theme *th, bool hovered)
+                           const Theme *th, bool hovered, bool active)
 {
     Rect r = row->rect;
     int text_y = r.y + r.h - f->cell_height - 6;
-    if (hovered)
+
+    // Страница группы без процесса живёт в самом заголовке: активная —
+    // с той же отметкой, что у активной вкладки проекта.
+    if (active) {
+        Rect a = { r.x, text_y - 4, r.w, f->cell_height + 8 };
+        draw_active_mark(a, th);
+    }
+
+    // Закреплённая группа (интеграции) идёт на своей подложке во всю
+    // высоту блока — цветом группы, еле-еле: это не выделение и не
+    // состояние, а «здесь другое хозяйство». Рисуется до всего остального:
+    // строки проектов идут после и ложатся поверх.
+    if (row->pinned && row->block_h > 0) {
+        Color bg = { row->color.r, row->color.g, row->color.b, 26 };
+        DrawRectangle(r.x, r.y, r.w, row->block_h, bg);
+    }
+
+    if (hovered && !active)
         DrawRectangle(r.x, text_y - 4, r.w, f->cell_height + 8, th->row_hover_bg);
 
     // ▸ / ▾ — из запасного шрифта, если в основном нет.
@@ -415,13 +434,23 @@ static void draw_item_row(const PanelRow *row, const Project *project,
     if (!session) name_color = th->row_text_dim;
     else if (session->state == SESSION_STATE_DEAD) name_color = th->badge_dead;
     int nw = ui_text_clipped(f, name, text_x, r.y + 4, name_color, avail);
+    int after = nw + f->cell_width;   // где продолжать после имени
 
     // Сколько подпроектов свёрнуто — как у группы, числом после имени.
     if (row->has_subs && !row->expanded && row->hidden > 0) {
         char n[16];
         snprintf(n, sizeof(n), "· %d", row->hidden);
-        ui_text_clipped(f, n, text_x + nw + f->cell_width, r.y + 4,
-                        th->group_label, avail - nw - f->cell_width);
+        after += ui_text_clipped(f, n, text_x + after, r.y + 4,
+                                 th->group_label, avail - after) + f->cell_width;
+    }
+
+    // Сколько записей ждут человека (фильтр таблицы) — цветом внимания, как
+    // «зовёт»: это про данные проекта, а не про агента. Ноль — тишина:
+    // таймер, который ничего не принёс, панели не касается.
+    if (project && project->pending > 0 && avail - after > f->cell_width * 4) {
+        char n[64];
+        snprintf(n, sizeof(n), "· %d %s", project->pending, project->pending_label);
+        ui_text_clipped(f, n, text_x + after, r.y + 4, th->badge_attention, avail - after);
     }
 
     // Вторая строка есть только у открытых: чем занята сессия — состояние
@@ -709,6 +738,12 @@ void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
 {
     if (!l->sidebar_visible) return;
 
+    // Пока открыто меню, панель под ним мыши не видит: подсветка строки и
+    // значки под курсором (страница, крестик, «+») появлялись сквозь меню и
+    // читались как «наведено сразу на два». Клик панель и так не получает —
+    // это то же правило, только для вида.
+    if (ui_menu_is_open()) mouse = (Vector2){ -1, -1 };
+
     DrawRectangle(l->sidebar.x, l->sidebar.y, l->sidebar.w, l->sidebar.h,
                   theme->sidebar_bg);
 
@@ -730,7 +765,9 @@ void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
         if (row->rect.y > l->sidebar.y + l->sidebar.h) break;
 
         if (row->kind == PANEL_ROW_GROUP) {
-            draw_group_row(row, font, theme, hovered == row);
+            // Заголовок носит страницу группы, пока у той нет процесса.
+            bool page_active = row->session >= 0 && row->session == sessions->active;
+            draw_group_row(row, font, theme, hovered == row, page_active);
             continue;
         }
         if (row->kind == PANEL_ROW_ADD_GROUP) {
@@ -755,4 +792,141 @@ void ui_draw_sidebar(const Layout *l, const ProjectList *projects,
 
     DrawRectangle(l->splitter.x, l->splitter.y, l->splitter.w, l->splitter.h,
                   splitter_active ? theme->splitter_hover : theme->splitter);
+}
+
+// ── Контекстное меню панели ───────────────────────────────────────────────
+// Состояние живёт здесь, а не в App: меню — часть панели, и знать о нём
+// приложению нужно ровно два раза (открыть и спросить, куда попали).
+
+#define MENU_ITEM_MAX 4
+#define MENU_PAD_X    12
+#define MENU_PAD_Y    6
+
+typedef struct { const char *label; int id; bool danger; } MenuItem;
+
+static struct {
+    bool open;
+    bool has_session;
+    bool group;          // меню заголовка группы, а не строки проекта
+    bool can_rename;
+    char cwd[SESSION_PATH_MAX];
+    char label[PROJECT_NAME_MAX];
+    Rect box;
+    MenuItem items[MENU_ITEM_MAX];
+    int count;
+} g_menu;
+
+// Набор пунктов зависит от одного: есть ли живой разговор. Подтверждения
+// нет намеренно — из списка проект убирается, на диске не меняется ничего,
+// и вернуть его можно на экране настроек. Спрашивать «точно?» про обратимое
+// значит приучать жать «да» не глядя.
+static void menu_build(const FontAtlas *f)
+{
+    g_menu.count = 0;
+    if (g_menu.group) {
+        if (g_menu.can_rename)
+            g_menu.items[g_menu.count++] = (MenuItem){
+                "Переименовать", UI_MENU_RENAME, false };
+        if (g_menu.cwd[0])
+            g_menu.items[g_menu.count++] = (MenuItem){
+                "Показать папку", UI_MENU_REVEAL, false };
+    } else {
+        if (g_menu.has_session)
+            g_menu.items[g_menu.count++] = (MenuItem){
+                "Закрыть разговор", UI_MENU_CLOSE_SESSION, false };
+        g_menu.items[g_menu.count++] = (MenuItem){
+            "Переименовать", UI_MENU_RENAME, false };
+        g_menu.items[g_menu.count++] = (MenuItem){
+            "Показать папку", UI_MENU_REVEAL, false };
+        g_menu.items[g_menu.count++] = (MenuItem){
+            "Убрать из списка", UI_MENU_HIDE, true };
+    }
+
+    size_t widest = 0;
+    for (int i = 0; i < g_menu.count; i++) {
+        size_t n = strlen_utf8_cells(g_menu.items[i].label);
+        if (n > widest) widest = n;
+    }
+    g_menu.box.w = (int)widest * f->cell_width + MENU_PAD_X * 2;
+    g_menu.box.h = g_menu.count * (f->cell_height + MENU_PAD_Y * 2) + 4;
+}
+
+void ui_menu_open(const char *cwd, bool has_session, Vector2 at,
+                  const FontAtlas *f)
+{
+    memset(&g_menu, 0, sizeof(g_menu));
+    snprintf(g_menu.cwd, sizeof(g_menu.cwd), "%s", cwd ? cwd : "");
+    g_menu.has_session = has_session;
+    g_menu.open = true;
+    g_menu.box.x = (int)at.x;
+    g_menu.box.y = (int)at.y;
+    menu_build(f);
+
+    // Не вылезать за окно: у нижних строк панели меню иначе уехало бы под край.
+    int sw = GetScreenWidth(), sh = GetScreenHeight();
+    if (g_menu.box.x + g_menu.box.w > sw) g_menu.box.x = sw - g_menu.box.w - 4;
+    if (g_menu.box.y + g_menu.box.h > sh) g_menu.box.y = sh - g_menu.box.h - 4;
+    if (g_menu.box.x < 0) g_menu.box.x = 0;
+    if (g_menu.box.y < 0) g_menu.box.y = 0;
+}
+
+void ui_menu_open_group(const char *label, const char *dir, bool can_rename,
+                        Vector2 at, const FontAtlas *f)
+{
+    ui_menu_open(dir, false, at, f);
+    g_menu.group = true;
+    g_menu.can_rename = can_rename;
+    snprintf(g_menu.label, sizeof(g_menu.label), "%s", label ? label : "");
+    menu_build(f);
+    if (g_menu.count == 0) g_menu.open = false;   // нечего показывать
+}
+
+bool ui_menu_is_open(void)      { return g_menu.open; }
+bool ui_menu_is_group(void)     { return g_menu.group; }
+const char *ui_menu_label(void) { return g_menu.label; }
+const char *ui_menu_cwd(void)   { return g_menu.cwd; }
+void ui_menu_close(void)       { g_menu.open = false; }
+
+static int menu_item_at(Vector2 m)
+{
+    if (!g_menu.open) return -1;
+    const Rect *b = &g_menu.box;
+    if (m.x < b->x || m.x >= b->x + b->w || m.y < b->y || m.y >= b->y + b->h)
+        return -1;
+    int h = b->h / (g_menu.count ? g_menu.count : 1);
+    int i = (int)((m.y - (float)b->y) / (float)h);
+    return (i >= 0 && i < g_menu.count) ? i : -1;
+}
+
+int ui_menu_click(Vector2 mouse, const FontAtlas *f)
+{
+    int i = menu_item_at(mouse);
+    if (i < 0) { g_menu.open = false; return UI_MENU_NONE; }
+
+    (void)f;
+    g_menu.open = false;
+    return g_menu.items[i].id;
+}
+
+void ui_menu_draw(const FontAtlas *f, const Theme *th, Vector2 mouse)
+{
+    if (!g_menu.open || g_menu.count == 0) return;
+    const Rect *b = &g_menu.box;
+
+    DrawRectangle(b->x + 2, b->y + 3, b->w, b->h, (Color){ 0, 0, 0, 60 });
+    DrawRectangle(b->x, b->y, b->w, b->h, th->sidebar_bg);
+    DrawRectangleLines(b->x, b->y, b->w, b->h, th->sidebar_border);
+
+    int h = b->h / g_menu.count;
+    int hovered = menu_item_at(mouse);
+    for (int i = 0; i < g_menu.count; i++) {
+        int y = b->y + i * h;
+        if (i == hovered)
+            DrawRectangle(b->x + 1, y, b->w - 2, h, th->row_hover_bg);
+        Color fg = g_menu.items[i].danger
+                 ? (i == hovered ? th->badge_dead : th->row_text)
+                 : th->row_text;
+        ui_text_clipped(f, g_menu.items[i].label, b->x + MENU_PAD_X,
+                        y + (h - f->cell_height) / 2, fg, b->w - MENU_PAD_X * 2);
+    }
 }

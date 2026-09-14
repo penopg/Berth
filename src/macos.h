@@ -29,8 +29,10 @@ unsigned macos_modifier_flags(void);
 bool macos_clipboard_image_path(char *out, size_t out_size);
 
 // Системный выбор папки. start — где открыть диалог (NULL — где система
-// решит). Возвращает false, если человек отказался.
-bool macos_choose_folder(const char *start, const char *prompt,
+// решит), message — пояснение в шапке диалога: зачем папка. Кнопка всегда
+// «Выбрать», новую папку можно завести прямо в диалоге. Возвращает false,
+// если человек отказался.
+bool macos_choose_folder(const char *start, const char *message,
                          char *out, size_t cap);
 
 #endif // BERTH_MACOS_H

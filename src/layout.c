@@ -120,6 +120,37 @@ static int session_row_of(const SessionList *sessions, int project)
     return -1;
 }
 
+// Вкладка папки группы (страница группы или разговор в ней), либо -1.
+static int group_session_of(const SessionList *sessions, const char *group)
+{
+    for (int i = 0; i < sessions->count; i++)
+        if (sessions->items[i].group_tab && sessions->items[i].role == SESSION_ROLE_MAIN
+            && !strcmp(sessions->items[i].group, group))
+            return i;
+    return -1;
+}
+
+// Вкладка стоит при какой-то группе: сама вкладка группы или задача,
+// запущенная из неё (у задачи тот же каталог).
+static bool belongs_to_group_tab(const SessionList *sessions, int i)
+{
+    const Session *s = &sessions->items[i];
+    if (s->group_tab) return true;
+    for (int k = 0; k < sessions->count; k++)
+        if (sessions->items[k].group_tab && !strcmp(sessions->items[k].cwd, s->cwd))
+            return true;
+    return false;
+}
+
+// Группа с видом — закреплённая: см. ProjectList.pinned.
+static const PinnedGroup *pinned_of(const ProjectList *p, const char *group)
+{
+    if (!group || !*group) return NULL;
+    for (int i = 0; i < p->pinned_count; i++)
+        if (!strcmp(p->pinned[i].name, group)) return &p->pinned[i];
+    return NULL;
+}
+
 static PanelRow *push_row(Layout *l, PanelRowKind kind, int y, int height,
                           int project, int session, const char *label)
 {
@@ -151,6 +182,41 @@ static PanelRow *push_task_rows(Layout *l, const SessionList *sessions,
     return last;
 }
 
+static void link_child(PanelRow *parent, PanelRow **last_child, PanelRow *child);
+
+// Задачи вкладки группы: проекта у них нет, свои они по каталогу.
+static PanelRow *push_group_task_rows(Layout *l, const SessionList *sessions,
+                                      const char *cwd, int *y)
+{
+    PanelRow *last = NULL;
+    for (int k = 0; k < sessions->count; k++) {
+        const Session *t = &sessions->items[k];
+        if (t->role != SESSION_ROLE_TASK || t->project >= 0 || strcmp(t->cwd, cwd)) continue;
+        PanelRow *row = push_row(l, PANEL_ROW_TASK, *y, l->metrics.task_height, -1, k, NULL);
+        if (row) { row->depth = 1; last = row; }
+        *y += l->metrics.task_height;
+    }
+    return last;
+}
+
+// Строка разговора группы под её заголовком. Страница без процесса строки
+// не получает: её носит сам заголовок (клик открывает, активная — с
+// отметкой). Живой разговор — строкой, как у проекта: у него есть состояние.
+static void push_group_session(Layout *l, const SessionList *sessions,
+                               PanelRow *head, bool collapsed, int *y, time_t now)
+{
+    if (!head) return;
+    int gs = group_session_of(sessions, head->label);
+    if (gs < 0) return;
+    if (!live_row(sessions, gs)) { head->session = gs; return; }
+    if (collapsed && !l->collapsed_show_live) { head->hidden++; return; }
+    int h = session_row_height(l, sessions, gs, now);
+    PanelRow *row = push_row(l, PANEL_ROW_ITEM, *y, h, -1, gs, NULL);
+    *y += h;
+    PanelRow *last = NULL;
+    link_child(row, &last, push_group_task_rows(l, sessions, sessions->items[gs].cwd, y));
+}
+
 // Ребёнок добавлен под родителя: у родителя начинается направляющая, а
 // последним ребёнком пока считается этот — следующий его сменит.
 static void link_child(PanelRow *parent, PanelRow **last_child, PanelRow *child)
@@ -178,6 +244,25 @@ static void build_rows(Layout *l, const ProjectList *projects,
     bool project_done[PROJECT_MAX] = {0};
     time_t now = time(NULL);
 
+    // Закреплённые группы без проектов — самыми первыми строками. Заголовок
+    // в общем цикле ниже рождается из первого проекта группы, поэтому пустая
+    // группа не появилась бы вовсе; а проекты непустых закреплённых уже
+    // стоят в начале списка (`groups_apply`), и общий цикл выведет их первыми.
+    for (int i = 0; i < projects->pinned_count; i++) {
+        if (!projects->pinned[i].empty) continue;
+        PanelRow *head = push_row(l, PANEL_ROW_GROUP, y, l->metrics.group_height,
+                                  -1, -1, projects->pinned[i].name);
+        if (head) {
+            head->collapsed = layout_group_collapsed(l, projects->pinned[i].name);
+            head->color = projects->pinned[i].color;
+            head->pinned = true;
+        }
+        y += l->metrics.group_height;
+        push_group_session(l, sessions, head, head ? head->collapsed : false, &y, now);
+        if (head) head->block_h = y - head->rect.y;
+        y += 6;
+    }
+
     for (int i = 0; i < projects->count; i++) {
         if (project_done[i]) continue;
 
@@ -186,14 +271,17 @@ static void build_rows(Layout *l, const ProjectList *projects,
         PanelRow *head = NULL;
         if (group[0]) {
             head = push_row(l, PANEL_ROW_GROUP, y, l->metrics.group_height, -1, -1, group);
+            const PinnedGroup *pin = pinned_of(projects, group);
             if (head) {
                 head->collapsed = collapsed;
-                head->color = projects->items[i].color;
+                head->color = pin ? pin->color : projects->items[i].color;
+                head->pinned = pin != NULL;
                 for (int j = i; j < projects->count; j++)
                     if (!strcmp(projects->items[j].group, group) && projects->items[j].parent < 0)
                         head->count++;
             }
             y += l->metrics.group_height;
+            push_group_session(l, sessions, head, collapsed, &y, now);
         }
 
         for (int j = i; j < projects->count; j++) {
@@ -248,6 +336,11 @@ static void build_rows(Layout *l, const ProjectList *projects,
             if (prow) prow->expanded = expanded;
         }
 
+        // Высота блока известна только здесь: подложку закреплённой группы
+        // рисует её заголовок, а сколько под ним строк — видно только когда
+        // они разложены.
+        if (head) head->block_h = y - head->rect.y;
+
         y += 6;
     }
 
@@ -259,6 +352,7 @@ static void build_rows(Layout *l, const ProjectList *projects,
     PanelRow *loose_head = NULL;
     for (int i = 0; i < sessions->count; i++) {
         if (sessions->items[i].project >= 0) continue;
+        if (belongs_to_group_tab(sessions, i)) continue;
         if (!has_loose) {
             has_loose = true;
             loose_head = push_row(l, PANEL_ROW_GROUP, y, l->metrics.group_height, -1, -1, "прочее");
@@ -367,12 +461,20 @@ bool layout_hit_splitter(const Layout *l, Vector2 mouse)
     return inside(grab, mouse);
 }
 
+// Строка, за которой стоит вкладка: проект или вкладка с сессией, либо
+// заголовок группы, несущий её страницу (живой разговор группы идёт
+// отдельной строкой, и заголовок тогда сессии не несёт).
+static bool row_is_tab(const PanelRow *r)
+{
+    return r->session >= 0 && (r->kind == PANEL_ROW_ITEM || r->kind == PANEL_ROW_GROUP);
+}
+
 int layout_session_at(const Layout *l, int nth)
 {
     if (nth < 0) return -1;
     int seen = 0;
     for (int i = 0; i < l->row_count; i++) {
-        if (l->rows[i].kind != PANEL_ROW_ITEM || l->rows[i].session < 0) continue;
+        if (!row_is_tab(&l->rows[i])) continue;
         if (seen == nth) return l->rows[i].session;
         seen++;
     }
@@ -383,7 +485,7 @@ int layout_position_of(const Layout *l, int session)
 {
     int seen = 0;
     for (int i = 0; i < l->row_count; i++) {
-        if (l->rows[i].kind != PANEL_ROW_ITEM || l->rows[i].session < 0) continue;
+        if (!row_is_tab(&l->rows[i])) continue;
         if (l->rows[i].session == session) return seen;
         seen++;
     }
@@ -394,6 +496,6 @@ int layout_session_count(const Layout *l)
 {
     int n = 0;
     for (int i = 0; i < l->row_count; i++)
-        if (l->rows[i].kind == PANEL_ROW_ITEM && l->rows[i].session >= 0) n++;
+        if (row_is_tab(&l->rows[i])) n++;
     return n;
 }

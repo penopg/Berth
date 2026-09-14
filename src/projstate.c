@@ -6,7 +6,6 @@
 // Сколько проектов держим прочитанными. Набор весит около 170 КБ, а держать
 // их сотнями незачем: человек работает с единицами, остальные читаются заново
 // за десятки миллисекунд.
-#define PROJSTATE_MAX 8
 
 static ProjectState g_states[PROJSTATE_MAX];
 
@@ -105,6 +104,11 @@ static void sync_tables(ProjectState *st)
             || table_changed(&st->tables[i], st->cwd))
             table_load(&st->tables[i], st->cwd, fl->shown[i]);
         table_set_cols(&st->tables[i], fl->shown_cols[i]);
+        int fi = files_filter_of(fl, fl->shown[i]);
+        if (fi >= 0)
+            table_set_filter(&st->tables[i], fl->filt_col[fi], fl->filt_empty[fi], fl->filt_label[fi]);
+        else
+            table_set_filter(&st->tables[i], NULL, false, NULL);
     }
     for (int i = fl->shown_count; i < FILES_SHOWN_MAX; i++)
         if (st->tables[i].path[0]) memset(&st->tables[i], 0, sizeof(st->tables[i]));
@@ -115,6 +119,12 @@ void projstate_sync_tables(const char *cwd)
 {
     ProjectState *st = projstate_edit(cwd);
     if (st) sync_tables(st);
+}
+
+const ProjectState *projstate_cached(int i)
+{
+    if (i < 0 || i >= PROJSTATE_MAX || !g_states[i].cwd[0]) return NULL;
+    return &g_states[i];
 }
 
 void projstate_poll(void)

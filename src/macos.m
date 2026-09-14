@@ -109,7 +109,7 @@ unsigned macos_modifier_flags(void)
     return mods;
 }
 
-bool macos_choose_folder(const char *start, const char *prompt,
+bool macos_choose_folder(const char *start, const char *message,
                          char *out, size_t cap)
 {
     if (!out || !cap) return false;
@@ -120,10 +120,15 @@ bool macos_choose_folder(const char *start, const char *prompt,
         panel.canChooseFiles = NO;
         panel.canChooseDirectories = YES;
         panel.allowsMultipleSelection = NO;
-        panel.canCreateDirectories = NO;
-        panel.message = @"Выберите папку: её подпапки станут проектами группы";
-        if (prompt && *prompt)
-            panel.prompt = [NSString stringWithUTF8String:prompt];
+        // Новую папку заводят прямо здесь: у папки интеграций иначе пришлось
+        // бы сначала идти в Finder, а потом возвращаться.
+        panel.canCreateDirectories = YES;
+        // Кнопка — глагол, пояснение — в шапке диалога. Первая версия
+        // отдавала в кнопку название («Папка интеграций»), и она читалась
+        // как непонятно что.
+        panel.prompt = @"Выбрать";
+        if (message && *message)
+            panel.message = [NSString stringWithUTF8String:message];
         if (start && *start)
             panel.directoryURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:start]];
 
@@ -136,3 +141,4 @@ bool macos_choose_folder(const char *start, const char *prompt,
     }
     return out[0] != '\0';
 }
+

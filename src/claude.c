@@ -92,6 +92,20 @@ static bool listed(const char *list, const char *name)
     return false;
 }
 
+// Наказ берта каждому запуску claude. Описание скилла — подсказка, и агент
+// в Internet Revolution написал письмо, не описав его: скилл berth-files
+// он видел в списке и не позвал. Паспорт из папки --add-dir Claude Code не
+// читает (проверено), поэтому правило едет системным промптом. Без
+// апострофов и кавычек: строка уходит файлом rules.md в пакете и
+// подставляется через $(cat …) — набранная в оболочку целиком, она
+// красовалась бы на экране вкладки. Claude Code
+// запоминает его при первом запросе разговора; продолженный разговор
+// получит новый текст только после сжатия.
+static const char BERTH_RULES[] =
+    "Ты запущен из берта (Berth). Его правила обязательны:\n- Создал или существенно переписал документ для человека (письмо, записку, отчёт, таблицу, презентацию, картинку, запись) — в том же ходе допиши строку в .berth/files.tsv проекта: путь, табуляция, что это одной фразой (скилл berth-files). Код, конфиги, паспорт и служебные файлы не описываются.\n- Задачи и планы — в .berth/tasks.md (скилл berth-tasks), а не списком в ответе.\n- Однотипные записи с атрибутами, к которым вернутся, — таблицей .berth/data/<имя>.tsv (скилл berth-data).\n- Новый проект — новая папка с паспортом CLAUDE.md рядом с проектами той же группы; в панель берт добавит её сам, списки проектов править не нужно.\nСкиллы berth-* лежат в подключённой папке пакета.";
+
+const char *claude_rules_text(void) { return BERTH_RULES; }
+
 void claude_install_bundle(const char *off)
 {
     const char *dir = claude_bundle_dir();
@@ -112,6 +126,10 @@ void claude_install_bundle(const char *off)
         fputs(SKILLS_BUILTIN[i].skill_md, f);
         fclose(f);
     }
+    char rules[1200];
+    snprintf(rules, sizeof(rules), "%s/rules.md", dir);
+    FILE *rf = fopen(rules, "w");
+    if (rf) { fputs(BERTH_RULES, rf); fputc('\n', rf); fclose(rf); }
 }
 
 void claude_with_bundle(const char *cmd, char *out, size_t cap)
@@ -123,5 +141,6 @@ void claude_with_bundle(const char *cmd, char *out, size_t cap)
         snprintf(out, cap, "%s", cmd);
         return;
     }
-    snprintf(out, cap, "claude --add-dir '%s'%s", dir, cmd + 6);
+    snprintf(out, cap, "claude --add-dir '%s' --append-system-prompt \"$(cat '%s/rules.md')\"%s",
+             dir, dir, cmd + 6);
 }
