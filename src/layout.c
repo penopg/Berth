@@ -399,6 +399,8 @@ void layout_compute(Layout *l, const ProjectList *projects,
     l->topbar = (Rect){ 0, 0, win_w, th };
     int bw = l->metrics.settings_width;
     l->topbar_settings = (Rect){ win_w - bw - 8, 4, bw, th - 8 };
+    int tw = l->metrics.tasks_width;
+    l->topbar_tasks = (Rect){ l->topbar_settings.x - tw - 6, 4, tw, th - 8 };
     int top = th;
     int h = win_h - th;
 
@@ -447,6 +449,11 @@ bool layout_hit_topbar(const Layout *l, Vector2 mouse)
 bool layout_hit_settings(const Layout *l, Vector2 mouse)
 {
     return inside(l->topbar_settings, mouse);
+}
+
+bool layout_hit_tasks(const Layout *l, Vector2 mouse)
+{
+    return inside(l->topbar_tasks, mouse);
 }
 
 bool layout_hit_splitter(const Layout *l, Vector2 mouse)

@@ -78,6 +78,7 @@ typedef struct {
     int group_height;
     int topbar_height;     // высота верхней полосы с кнопками окна
     int settings_width;    // ширина кнопки настроек на ней
+    int tasks_width;       // ширина кнопки «Задачи» рядом с ней
     int pad;
 } LayoutMetrics;
 
@@ -89,6 +90,7 @@ typedef struct {
     // и человек, не знающий сочетания, до них не добирался.
     Rect topbar;
     Rect topbar_settings;   // кнопка настроек в правом краю полосы
+    Rect topbar_tasks;      // кнопка «Задачи» слева от неё
 
     Rect sidebar;
     Rect splitter;
@@ -198,6 +200,7 @@ bool layout_hit_splitter(const Layout *l, Vector2 mouse);
 // Курсор над верхней полосой и над её кнопкой настроек.
 bool layout_hit_topbar(const Layout *l, Vector2 mouse);
 bool layout_hit_settings(const Layout *l, Vector2 mouse);
+bool layout_hit_tasks(const Layout *l, Vector2 mouse);
 
 // Переход по порядку строк панели, а не по порядку в массиве сессий.
 // Панель группирует вкладки, поэтому визуальный порядок не совпадает с

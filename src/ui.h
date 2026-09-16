@@ -19,6 +19,10 @@
 // рисуются и панель, и страницы: обрыв UTF-8 на середине символа даёт мусор
 // одинаково везде.
 // Возвращает ширину нарисованного в точках.
+// Прописными: ASCII и кириллица таблицей, без локали. Заголовки групп в
+// панели и на странице всех задач.
+void upper_utf8(char *dst, size_t cap, const char *src);
+
 int  ui_text_clipped(const FontAtlas *f, const char *text,
                      int x, int y, Color color, int max_width);
 
@@ -36,8 +40,10 @@ void ui_draw_marker(Rect cell, bool open, SessionState state, double time,
                     const Theme *theme);
 
 // Верхняя полоса: имя активной вкладки слева, кнопка настроек справа.
+// tasks_review — сколько задач по всем проектам ждут проверки: кнопка
+// «Задачи» пишет число цветом внимания, это то, что ждёт человека.
 void ui_draw_topbar(const Layout *l, const SessionList *sessions,
-                    const Usage *usage,
+                    const Usage *usage, int tasks_review,
                     const FontAtlas *font, const Theme *theme, Vector2 mouse);
 
 // Контекстное меню по правому щелчку в панели. Место для того, что делают

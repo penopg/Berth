@@ -100,6 +100,92 @@ static void append(char *dst, size_t cap, const char *s)
     dst[used + n] = '\0';
 }
 
+// День календаря из даты — без часовых поясов и mktime: сравниваются дни,
+// а не секунды. Формула юлианского дня по Флигелю и ван Фландерну.
+static long day_of(int y, int m, int d)
+{
+    long a = (14 - m) / 12;
+    long yy = y + 4800 - a;
+    long mm = m + 12 * a - 3;
+    return d + (153 * mm + 2) / 5 + 365 * yy + yy / 4 - yy / 100 + yy / 400 - 32045;
+}
+
+long tasks_day_parse(const char *s)
+{
+    int y, m, d;
+    if (sscanf(s, "%4d-%2d-%2d", &y, &m, &d) != 3) return 0;
+    if (y < 2000 || m < 1 || m > 12 || d < 1 || d > 31) return 0;
+    return day_of(y, m, d);
+}
+
+long tasks_day_today(void)
+{
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    return day_of(tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+}
+
+// `срок: 2026-09-20` — своей строкой где угодно в описании; первая
+// найденная и есть срок. Строка остаётся в тексте: её написал человек или
+// агент, и на странице она читается как часть описания.
+static void parse_due(Task *task)
+{
+    task->due_day = 0;
+    const char *p = task->body;
+    while (p && *p) {
+        const char *key = NULL;
+        if (!strncmp(p, "срок:", 9)) key = p + 9;          // «срок» — 8 байт UTF-8
+        else if (!strncmp(p, "Срок:", 9)) key = p + 9;
+        if (key) {
+            while (*key == ' ' || *key == '\t') key++;
+            long day = tasks_day_parse(key);
+            if (day) { task->due_day = day; return; }
+        }
+        p = strchr(p, '\n');
+        if (p) p++;
+    }
+}
+
+// Обратно: день календаря в год, месяц, число (та же формула).
+static void ymd_of(long jd, int *y, int *m, int *d)
+{
+    long l = jd + 68569;
+    long n = 4 * l / 146097;
+    l = l - (146097 * n + 3) / 4;
+    long i = 4000 * (l + 1) / 1461001;
+    l = l - 1461 * i / 4 + 31;
+    long j = 80 * l / 2447;
+    *d = (int)(l - 2447 * j / 80);
+    l = j / 11;
+    *m = (int)(j + 2 - 12 * l);
+    *y = (int)(100 * (n - 49) + i + l);
+}
+
+int tasks_due_text(long due_day, char *out, size_t cap)
+{
+    if (cap) out[0] = '\0';
+    if (!due_day) return 0;
+    static const char *months[12] = { "янв", "фев", "мар", "апр", "мая", "июн",
+                                      "июл", "авг", "сен", "окт", "ноя", "дек" };
+    long delta = due_day - tasks_day_today();
+    if (delta < 0) {
+        if (delta == -1) snprintf(out, cap, "вчера");
+        else snprintf(out, cap, "просрочено %ld дн", -delta);
+        return 3;
+    }
+    if (delta == 0) { snprintf(out, cap, "сегодня"); return 2; }
+    if (delta == 1) { snprintf(out, cap, "завтра"); return 2; }
+    int y, m, d;
+    ymd_of(due_day, &y, &m, &d);
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    if (y != tm.tm_year + 1900) snprintf(out, cap, "до %d %s %d", d, months[m - 1], y);
+    else                        snprintf(out, cap, "до %d %s", d, months[m - 1]);
+    return 1;
+}
+
 void tasks_load(TaskList *t, const char *cwd)
 {
     memset(t, 0, sizeof(*t));
@@ -150,7 +236,10 @@ void tasks_load(TaskList *t, const char *cwd)
     fclose(f);
 
     rtrim(t->preamble);
-    for (int i = 0; i < t->count; i++) rtrim(t->items[i].body);
+    for (int i = 0; i < t->count; i++) {
+        rtrim(t->items[i].body);
+        parse_due(&t->items[i]);
+    }
 }
 
 bool tasks_save(TaskList *t, const char *cwd)

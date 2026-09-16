@@ -144,7 +144,7 @@ void ui_draw_marker(Rect cell, bool open, SessionState state, double time,
 
 // Прописные для заголовка группы: ASCII и кириллица, остального в именах
 // групп не встречается. Простая таблица вместо towupper: локаль нам ни к чему.
-static void upper_utf8(char *dst, size_t cap, const char *src)
+void upper_utf8(char *dst, size_t cap, const char *src)
 {
     size_t o = 0;
     for (const unsigned char *p = (const unsigned char *)src; *p && o + 3 < cap; ) {
@@ -695,7 +695,7 @@ static int draw_usage(const Usage *u, const FontAtlas *f, const Theme *th,
 }
 
 void ui_draw_topbar(const Layout *l, const SessionList *sessions,
-                    const Usage *usage,
+                    const Usage *usage, int tasks_review,
                     const FontAtlas *font, const Theme *theme, Vector2 mouse)
 {
     Rect t = l->topbar;
@@ -705,7 +705,7 @@ void ui_draw_topbar(const Layout *l, const SessionList *sessions,
     // Лимиты — свойство человека, а не вкладки: они одни на все окна и все
     // проекты, поэтому им место здесь, а не на странице проекта.
     int usage_x = draw_usage(usage, font, theme, t,
-                             l->topbar_settings.x - font->cell_width * 2, mouse);
+                             l->topbar_tasks.x - font->cell_width * 2, mouse);
 
     // Слева — над чем работаем: то же, что в заголовке окна. Заголовок
     // окна в полноэкранном режиме не виден, а здесь — всегда.
@@ -728,6 +728,25 @@ void ui_draw_topbar(const Layout *l, const SessionList *sessions,
                         (float)font->size, theme->row_text_dim);
     ui_text_clipped(font, "Настройки", b.x + 10 + font->cell_width * 2, ty,
                     theme->row_text_dim, b.w - font->cell_width * 2 - 16);
+
+    // «Задачи» — обзор по всем проектам. Число у подписи — сколько ждут
+    // проверки, цветом внимания: как «не разобрано» у проекта в панели,
+    // только по всему списку.
+    Rect k = l->topbar_tasks;
+    bool khover = mouse.x >= k.x && mouse.x < k.x + k.w
+               && mouse.y >= k.y && mouse.y < k.y + k.h;
+    DrawRectangle(k.x, k.y, k.w, k.h, khover ? theme->row_hover_bg : theme->row_active_bg);
+    font_draw_codepoint(font, 0x2611, (float)(k.x + 10), (float)ty,
+                        (float)font->size, theme->row_text_dim);
+    int lx = k.x + 10 + font->cell_width * 2;
+    int lw = ui_text_clipped(font, "Задачи", lx, ty, theme->row_text_dim,
+                             k.w - font->cell_width * 2 - 16);
+    if (tasks_review > 0) {
+        char n[24];
+        snprintf(n, sizeof(n), " · %d", tasks_review);
+        ui_text_clipped(font, n, lx + lw, ty, theme->badge_attention,
+                        k.w - font->cell_width * 2 - 16 - lw);
+    }
 }
 
 void ui_draw_sidebar(const Layout *l, const ProjectList *projects,

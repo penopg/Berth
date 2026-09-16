@@ -59,6 +59,12 @@ typedef struct {
     char title[TASK_TITLE_MAX];
     char body[TASK_BODY_MAX];   // описание как в файле, с переводами строк
     TaskState state;
+
+    // Срок: строка описания вида `срок: 2026-09-20`. Остаётся в описании
+    // как есть — файл принадлежит человеку, — а здесь разобрана: день по
+    // календарю (число дней от условного нуля, 0 — срока нет), чтобы
+    // сравнивать с сегодняшним и сортировать между проектами.
+    long due_day;
 } Task;
 
 typedef struct {
@@ -93,6 +99,14 @@ int  tasks_count_in(const TaskList *t, TaskState state);
 // Текст задачи для агента: название, под ним описание, а следом — что
 // сделать с задачей в файле, когда она будет закончена. Возвращает длину.
 size_t tasks_prompt(const Task *task, TaskFinish finish, char *out, size_t cap);
+
+// Срок словами: «сегодня», «завтра», «до 20 сен», «просрочено 3 дн»; пусто,
+// если срока нет. Возвращает строгость: 0 — срока нет, 1 — далеко, 2 —
+// сегодня или завтра, 3 — просрочено. По ней страница выбирает цвет.
+int  tasks_due_text(long due_day, char *out, size_t cap);
+// Разобрать `ГГГГ-ММ-ДД` в день календаря; 0, если это не дата.
+long tasks_day_parse(const char *s);
+long tasks_day_today(void);
 
 // Ключ настройки и обратно: review | done | none.
 const char *tasks_finish_name(TaskFinish f);

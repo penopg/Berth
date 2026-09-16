@@ -95,7 +95,11 @@ static bool scan(char *buf, long from, CtxInfo *out);
 
 bool ctx_read(const char *jsonl_path, CtxInfo *out)
 {
-    static const long tails[] = { 256 * 1024, 2 * 1024 * 1024 };
+    // После сжатия до первого ответа файл растёт вложениями реплики:
+    // паспорт проекта едет в каждой по полмегабайта, картинка — по
+    // 350 КБ. Полтора мегабайта за одну реплику — виденный случай, и
+    // граница сжатия за пределами хвоста оставила бы старый процент.
+    static const long tails[] = { 256 * 1024, 2 * 1024 * 1024, 16 * 1024 * 1024 };
     for (size_t i = 0; i < sizeof(tails) / sizeof(tails[0]); i++) {
         char *buf; size_t n; long from;
         if (!read_tail(jsonl_path, tails[i], &buf, &n, &from)) return false;
@@ -121,7 +125,12 @@ static bool scan(char *buf, long from, CtxInfo *out)
     CtxInfo best = {0};
     for (char *line = p; line && *line; ) {
         char *nl = strchr(line, '\n');
-        if (nl) *nl = '\0';
+        // Последняя строка без перевода дописывается прямо сейчас: у
+        // границы сжатия в ней может ещё не быть `postTokens`. Она не
+        // разбирается — дописанное изменит размер, и следующий опрос
+        // перечитает файл.
+        if (!nl) break;
+        *nl = '\0';
 
         if (strstr(line, "\"type\":\"assistant\"") && strstr(line, "\"usage\":{")) {
             char model[64];

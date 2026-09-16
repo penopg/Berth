@@ -18,6 +18,7 @@
 #include "settings.h"
 #include "groups.h"
 #include "usage.h"
+#include "alltasks.h"
 
 typedef enum {
     PAGE_EVENT_NONE = 0,
@@ -101,6 +102,10 @@ typedef enum {
                                  // title — имя (пустое — вернуть имя папки), arg — 1 у группы
     PAGE_EVENT_NEW_PROJECT,      // завести проект в группе: cwd — папка группы, text — группа,
                                  // title — имя папки, body — о чём одной строкой
+
+    // Страница всех задач. arg — номер записи в индексе (AllTasks.items).
+    PAGE_EVENT_OPEN_PROJECT,     // открыть страницу проекта или группы; text — имя группы
+    PAGE_EVENT_TASKS_MORE,       // раскрыть или свернуть «ещё N» у проекта
 
     // Задачи проекта из .berth/tasks.md. arg — номер задачи в списке.
     PAGE_EVENT_TODO_TOGGLE,      // раскрыть или свернуть описание
@@ -189,6 +194,14 @@ void page_ask_begin(const char *cwd, const char *head, const char *hint, const c
 
 PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
                             Rect view, Vector2 mouse);
+
+// Задачи всех проектов: проверить, сроки, очередь по группам и проектам.
+// Действия те же, что на странице проекта (события задач несут адрес
+// списка), редактора и перетаскивания нет: порядок и текст правятся там,
+// где задача живёт.
+PageEvent page_draw_all_tasks(const Session *s, const AllTasks *a,
+                              const FontAtlas *font, const Theme *theme,
+                              Rect view, Vector2 mouse, int scroll);
 
 PageEvent page_draw_settings(const Settings *st, const Groups *groups,
                              const Usage *usage, const FontAtlas *font,

@@ -208,11 +208,21 @@ static bool start_term(Session *s, const AgentProfile *agent,
 // Вкладка проекта, если она уже открыта. Проект и разговор — одно и то же:
 // у проекта одна живая сессия, а всё прошлое лежит в журнале и живёт там как
 // история, а не как десять процессов, ждущих неизвестно чего.
+// Страница окна — настройки, все задачи — не принадлежит проекту: каталог у
+// неё домашний, потому что какой-то нужен, и «разговором проекта» она быть
+// не может. Иначе «Задачи» открывали бы уже открытые «Настройки»: у обеих
+// один и тот же каталог.
+static bool window_page(const Session *s)
+{
+    return s->kind == SESSION_KIND_PAGE && s->page != SESSION_PAGE_PROJECT;
+}
+
 int session_of_project(const SessionList *list, const char *cwd)
 {
     if (!cwd || !*cwd) return -1;
     for (int i = 0; i < list->count; i++)
         if (list->items[i].role == SESSION_ROLE_MAIN
+            && !window_page(&list->items[i])
             && !strcmp(list->items[i].cwd, cwd))
             return i;
     return -1;
@@ -226,7 +236,8 @@ int session_open(SessionList *list, const SessionOpts *opts)
     // есть. Инвариант держим здесь, а не в каждом месте, откуда открывают
     // вкладку: забыть проверку в одном из них — вопрос времени. Задачи под
     // это правило не подпадают: они рядом с разговором, а не вместо него.
-    if (opts->role != SESSION_ROLE_TASK) {
+    bool window = opts->kind == SESSION_KIND_PAGE && opts->page != SESSION_PAGE_PROJECT;
+    if (opts->role != SESSION_ROLE_TASK && !window) {
         const char *want = (opts->cwd && *opts->cwd) ? opts->cwd : getenv("HOME");
         int existing = session_of_project(list, want);
         if (existing >= 0) {
@@ -411,10 +422,19 @@ void session_track_ctx(Session *s)
     char path[SESSION_PATH_MAX + PROJINFO_ID_MAX + 8];
     snprintf(path, sizeof(path), "%s/%s.jsonl", dir, s->session_id);
 
+    // Файл сравнивается по времени с наносекундами и по размеру. Одних
+    // секунд не хватало: сжатие пишет два десятка строк за полсекунды, и
+    // опрос, попавший между ними, запоминал секунду и дальше ту же секунду
+    // считал прочитанной — граница сжатия оставалась непрочитанной до
+    // следующей реплики, а панель держала процент, которого уже нет.
     struct stat st;
     if (stat(path, &st) != 0) return;
-    if (st.st_mtime == s->ctx_mtime) return;
+    long ns = (long)st.st_mtimespec.tv_nsec;
+    if (st.st_mtime == s->ctx_mtime && ns == s->ctx_mtime_ns
+        && (long)st.st_size == s->ctx_size) return;
     s->ctx_mtime = st.st_mtime;
+    s->ctx_mtime_ns = ns;
+    s->ctx_size = (long)st.st_size;
 
     CtxInfo info;
     if (ctx_read(path, &info)) s->ctx = info;
@@ -520,7 +540,8 @@ bool session_save_layout(const SessionList *list, const char *path, const char *
         // Вид вкладки идёт последним полем, чтобы файл, написанный прошлой
         // версией, читался без него: отсутствие поля означает терминал.
         const char *kind = !session_has_term(s)
-            ? (s->page == SESSION_PAGE_SETTINGS ? "settings" : "page")
+            ? (s->page == SESSION_PAGE_SETTINGS ? "settings"
+               : s->page == SESSION_PAGE_TASKS ? "tasks" : "page")
             : "term";
         // Диалог вкладки пишем последним полем: без него вкладка после
         // перезапуска выбирает сессию заново и попадает в чужую.
@@ -567,8 +588,8 @@ const char *session_task_state_text(const Session *s)
 void session_window_title(const Session *s, char *out, size_t cap)
 {
     if (!session_has_term(s)) {
-        snprintf(out, cap, "%s", s->page == SESSION_PAGE_SETTINGS
-                                 ? "Настройки" : s->name);
+        snprintf(out, cap, "%s", s->page == SESSION_PAGE_SETTINGS ? "Настройки"
+                               : s->page == SESSION_PAGE_TASKS ? "Задачи" : s->name);
         return;
     }
 
@@ -589,7 +610,8 @@ void session_window_title(const Session *s, char *out, size_t cap)
 const char *session_subtitle(const Session *s)
 {
     if (session_shows_page(s))
-        return s->page == SESSION_PAGE_SETTINGS ? "настройки" : "страница проекта";
+        return s->page == SESSION_PAGE_SETTINGS ? "настройки"
+             : s->page == SESSION_PAGE_TASKS ? "все задачи" : "страница проекта";
     if (s->state == SESSION_STATE_DEAD) return "завершено";
 
     const char *title = title_words(s->term.title);

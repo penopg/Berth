@@ -30,6 +30,7 @@
 #include "integrations.h"
 #include "timers.h"
 #include "pending.h"
+#include "alltasks.h"
 #include "subprojects.h"
 #include "skills.h"
 #include "xp.h"
@@ -54,6 +55,7 @@ typedef struct {
     Theme       theme;
     Settings    settings;
     Usage       usage;        // лимиты Claude Code для верхней полосы
+    AllTasks    alltasks;     // задачи всех проектов — страница «Задачи» и кнопка в полосе
 
     // Атлас спрайтов каратеки — один на окно, грузится после создания окна.
     // Сцены живут при вкладках (Session.scene).
@@ -122,6 +124,7 @@ static LayoutMetrics metrics_for(const FontAtlas *f)
         .group_height    = f->cell_height + 26,   // отбивка сверху больше межстрочной
         .topbar_height   = f->cell_height + 14,
         .settings_width  = f->cell_width * 12 + 20,
+        .tasks_width     = f->cell_width * 14 + 20,
         .pad             = PAD,
     };
 }
@@ -530,6 +533,29 @@ static void open_settings(App *app)
     save_layout(app);
 }
 
+static void refresh_alltasks(App *app);
+
+// Страница всех задач — как настройки: одна на окно, без процесса.
+static void open_tasks_page(App *app)
+{
+    for (int i = 0; i < app->sessions.count; i++) {
+        Session *s = &app->sessions.items[i];
+        if (!session_has_term(s) && s->page == SESSION_PAGE_TASKS) {
+            session_activate(&app->sessions, i);
+            return;
+        }
+    }
+    refresh_alltasks(app);
+    int idx = open_tab(app, -1, NULL, agent_by_id("shell"), SESSION_KIND_PAGE,
+                       SESSION_PAGE_TASKS);
+    if (idx >= 0) {
+        Session *s = &app->sessions.items[idx];
+        snprintf(s->name, sizeof(s->name), "Задачи");
+        s->group[0] = '\0';
+    }
+    save_layout(app);
+}
+
 // Что делать с тем, по чему кликнули на странице. Событие описывает намерение
 // («запусти агента», «продолжи вот эту сессию»), а как это исполнить — знает
 // приложение: у него и сетка терминала, и настройки, и файл раскладки.
@@ -711,6 +737,35 @@ static void open_group_page(App *app, const char *group)
     mark_group_tab(&app->sessions.items[idx], group);
     resize_all(app);
     save_layout(app);
+}
+
+// Индекс задач по всем проектам и папкам групп. Папки групп — те же, что у
+// страницы группы (`group_root`): у них свой tasks.md с задачами, у которых
+// проекта ещё нет. Опрос по mtime внутри, здесь только список.
+static void refresh_alltasks(App *app)
+{
+    AllTasksRoot roots[ALLTASKS_GROUPS];
+    int n = 0;
+    for (int i = 0; i < app->projects.count && n < ALLTASKS_GROUPS; i++) {
+        const Project *p = &app->projects.items[i];
+        if (p->parent >= 0 || !p->group[0]) continue;
+        bool seen = false;
+        for (int j = 0; j < n && !seen; j++) seen = !strcmp(roots[j].name, p->group);
+        if (seen) continue;
+        if (!group_root(app, p->group, roots[n].path, sizeof(roots[n].path))) continue;
+        snprintf(roots[n].name, sizeof(roots[n].name), "%s", p->group);
+        n++;
+    }
+    for (int i = 0; i < app->projects.pinned_count && n < ALLTASKS_GROUPS; i++) {
+        const char *g = app->projects.pinned[i].name;
+        bool seen = false;
+        for (int j = 0; j < n && !seen; j++) seen = !strcmp(roots[j].name, g);
+        if (seen) continue;
+        if (!group_root(app, g, roots[n].path, sizeof(roots[n].path))) continue;
+        snprintf(roots[n].name, sizeof(roots[n].name), "%s", g);
+        n++;
+    }
+    alltasks_refresh(&app->alltasks, &app->projects, roots, n);
 }
 
 static bool is_folder_group(const App *app, const char *root)
@@ -1166,6 +1221,8 @@ static void send_prompt(App *app, Session *s, const char *prompt, bool to_task,
     }
 }
 
+static void activate_project(App *app, int project);
+
 static void handle_page_event(App *app, Session *s, PageEvent ev)
 {
     if (getenv("BERTH_DEBUG_PAGE") && ev.kind)
@@ -1294,6 +1351,21 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
             resize_all(app);
             save_layout(app);
         }
+        break;
+
+    case PAGE_EVENT_OPEN_PROJECT: {
+        // Со страницы всех задач: проект — по номеру в списке панели, папка
+        // группы — по имени группы.
+        if (ev.arg < 0 || ev.arg >= app->alltasks.count) break;
+        const AllTasksEntry *e = &app->alltasks.items[ev.arg];
+        if (e->is_group) open_group_page(app, e->name);
+        else if (ev.arg < app->projects.count) activate_project(app, ev.arg);
+        break;
+    }
+
+    case PAGE_EVENT_TASKS_MORE:
+        if (ev.arg >= 0 && ev.arg < ALLTASKS_MAX)
+            s->page_more[ev.arg / 64] ^= 1ull << (ev.arg % 64);
         break;
 
     case PAGE_EVENT_TODO_TOGGLE:
@@ -1923,6 +1995,12 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         save_settings(app);
         break;
     }
+
+    // Записали задачу — обзор по всем проектам сверяется с диском сразу, а
+    // не через две секунды опроса: строка не должна висеть в старом виде.
+    if (ev.kind == PAGE_EVENT_TODO_STATE || ev.kind == PAGE_EVENT_TODO_SAVE
+        || ev.kind == PAGE_EVENT_TODO_MOVE)
+        refresh_alltasks(app);
 }
 
 // Открыть проект или переключиться на него, если он уже открыт.
@@ -2010,6 +2088,7 @@ static void reload_projects(App *app)
     groups_apply_names(&app->groups, &app->projects);
     save_projects_snapshot(app);
     refresh_pending(app);
+    refresh_alltasks(app);
 
     for (int i = 0; i < app->sessions.count; i++) {
         Session *s = &app->sessions.items[i];
@@ -2126,6 +2205,9 @@ static int restore_layout(App *app)
         } else if (kind && !strcmp(kind, "settings")) {
             sk = SESSION_KIND_PAGE;
             pk = SESSION_PAGE_SETTINGS;
+        } else if (kind && !strcmp(kind, "tasks")) {
+            sk = SESSION_KIND_PAGE;
+            pk = SESSION_PAGE_TASKS;
         }
 
         // Вкладка возвращается в свой диалог, а не тянет жребий заново: без
@@ -2367,6 +2449,9 @@ static bool handle_panel_mouse(App *app)
         if (layout_hit_settings(&app->layout, m)) {
             SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) open_settings(app);
+        } else if (layout_hit_tasks(&app->layout, m)) {
+            SetMouseCursor(MOUSE_CURSOR_POINTING_HAND);
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) open_tasks_page(app);
         }
         return true;
     }
@@ -2738,6 +2823,17 @@ int main(int argc, char **argv)
 
     // Кадр: раскладка → горячие клавиши → мышь → ввод → вывод процессов → отрисовка.
     while (!WindowShouldClose() && app.sessions.count > 0) {
+        // Всё, что закрывает вкладки само, — до раскладки. Строки панели
+        // держат индексы списка сессий, и закрытие между раскладкой и
+        // отрисовкой оставляет их указывать на сдвинутые или обнулённые
+        // вкладки: так берт упал в `session_subtitle` (2026-09-14), когда
+        // `forget_stale_tabs` закрыл страницу, простоявшую три дня, — стоя
+        // без дела, в конце кадра.
+        reap_tasks(&app);
+        forget_stale_tabs(&app);
+        term_reap_orphans();
+        if (app.sessions.count == 0) break;
+
         int win_w = GetScreenWidth();
         int win_h = GetScreenHeight();
         layout_compute(&app.layout, &app.projects, &app.sessions, win_w, win_h);
@@ -2770,6 +2866,7 @@ int main(int argc, char **argv)
             xp_flush_maybe();
             if (GetTime() - app.last_activity < 600) tick_timers();
             refresh_pending(&app);
+            refresh_alltasks(&app);
 
             // Состояние вкладок — из реестра Claude Code, тем же опросом:
             // по нему панель пишет «работает», «ждёт», «зовёт».
@@ -2866,9 +2963,6 @@ int main(int argc, char **argv)
         }
 
         session_poll_all(&app.sessions);
-        reap_tasks(&app);
-        forget_stale_tabs(&app);
-        term_reap_orphans();
         flush_pending_prompts(&app);
 
         // Признаки работы: мышь, клавиши, колесо — человек за окном; агент
@@ -2936,6 +3030,9 @@ int main(int argc, char **argv)
             page_event = active->page == SESSION_PAGE_SETTINGS
                 ? page_draw_settings(&app.settings, &app.groups, &app.usage, &app.font, active->theme,
                                      app.layout.term, pm, active->page_scroll)
+                : active->page == SESSION_PAGE_TASKS
+                ? page_draw_all_tasks(active, &app.alltasks, &app.font, active->theme,
+                                      app.layout.term, pm, active->page_scroll)
                 : page_draw_project(active, projstate_get(active->cwd),
                                     &app.sessions, &app.projects, &app.font, active->theme,
                                     app.layout.term, pm, active->page_scroll,
@@ -3006,8 +3103,8 @@ int main(int argc, char **argv)
                         app.layout.scene ? &app.sprites : NULL);
         // Полоса — последней: её балуны (подсказка к лимиту) висят поверх
         // всего, что ниже.
-        ui_draw_topbar(&app.layout, &app.sessions, &app.usage, &app.font, &app.theme,
-                       GetMousePosition());
+        ui_draw_topbar(&app.layout, &app.sessions, &app.usage, app.alltasks.review,
+                       &app.font, &app.theme, GetMousePosition());
 
         ui_menu_draw(&app.font, &app.theme, GetMousePosition());
 
