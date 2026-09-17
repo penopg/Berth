@@ -2903,7 +2903,18 @@ int main(int argc, char **argv)
         bool consumed = page_overlay_active() ? true : handle_hotkeys(&app);
         if (app.sessions.count == 0) break;
 
-        bool panel_took_mouse = handle_panel_mouse(&app);
+        // Карточка над окном модальная: клик мимо неё закрывает её, а панель
+        // и полоса в это время мыши не видят — иначе под открытой карточкой
+        // переключался проект.
+        bool panel_took_mouse = true;
+        if (page_overlay_active()) {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)
+                || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+                page_overlay_dismiss(GetMousePosition());
+            SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+        } else {
+            panel_took_mouse = handle_panel_mouse(&app);
+        }
         if (app.sessions.count == 0) break;
 
         // Мышь могла изменить списки: «Убрать из списка» закрывает сессии

@@ -40,8 +40,9 @@ static void load_entry(AllTasksEntry *e, time_t mtime, long ns)
 }
 
 static void sync_entry(AllTasksEntry *e, const char *path, const char *name,
-                       const char *group, bool is_group)
+                       const char *group, bool is_group, Color color)
 {
+    e->color = color;
     time_t mtime; long ns;
     stamp_of(path, &mtime, &ns);
     bool moved = strcmp(e->path, path) != 0;
@@ -58,11 +59,12 @@ void alltasks_refresh(AllTasks *a, const ProjectList *projects,
     int n = 0;
     for (int i = 0; i < projects->count && n < ALLTASKS_MAX; i++, n++) {
         const Project *p = &projects->items[i];
-        sync_entry(&a->items[n], p->path, p->name, p->group, false);
+        sync_entry(&a->items[n], p->path, p->name, p->group, false, p->color);
     }
     a->projects = n;
     for (int i = 0; i < nroots && n < ALLTASKS_MAX; i++, n++)
-        sync_entry(&a->items[n], roots[i].path, roots[i].name, roots[i].name, true);
+        sync_entry(&a->items[n], roots[i].path, roots[i].name, roots[i].name, true,
+                   (Color){ 0, 0, 0, 0 });
     a->count = n;
 
     a->open = a->review = a->due_soon = 0;

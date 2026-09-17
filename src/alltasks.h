@@ -34,6 +34,7 @@ typedef struct {
     char    name[PROJECT_NAME_MAX];    // имя проекта или группы в панели
     char    group[PROJECT_NAME_MAX];
     bool    is_group;                  // папка группы, не проект
+    Color   color;                     // цвет проекта из списка панели; у папки группы нули
     time_t  mtime;                     // .berth/tasks.md при чтении; 0 — файла нет
     long    mtime_ns;
     AllTask items[ALLTASKS_PER_ENTRY];

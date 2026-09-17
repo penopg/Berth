@@ -3360,8 +3360,12 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     }
 
     // Редактор чужой страницы закрываем: он про свой каталог. Свой — это
-    // каталог проекта или одного из его подпроектов.
-    if (g_edit.active && !g_edit.project && strcmp(g_edit.cwd, s->cwd)) {
+    // каталог проекта или одного из его подпроектов. Карточки над окном
+    // (новый проект, интеграция, почта, просьба, переименование) не
+    // страничные: их каталог — папка группы или чужого проекта, и по этому
+    // правилу карточка интеграции закрывалась в тот же кадр, что открылась,
+    // если под ней стояла страница другого проекта.
+    if (g_edit.active && !page_overlay_active() && strcmp(g_edit.cwd, s->cwd)) {
         bool ours = false;
         for (int k = 0; projects && k < projects->count; k++) {
             const Project *sub = &projects->items[k];
@@ -3468,6 +3472,20 @@ static void setting_section(Ctx *c, const char *title)
 // прошлого кадра: содержимое immediate mode, и сколько оно займёт,
 // известно только после отрисовки — на первом кадре подложка чуть короче.
 static int g_overlay_h;
+static Rect g_overlay_rect;   // где карточка была в прошлом кадре
+
+// Клик мимо карточки закрывает её, как Esc, и дальше не идёт: пока она
+// открыта, панель и страница под ней не должны отзываться — иначе можно
+// было переключить проект, оставив карточку висеть.
+bool page_overlay_dismiss(Vector2 mouse)
+{
+    if (!page_overlay_active() || g_overlay_rect.w <= 0) return false;
+    if (inside(g_overlay_rect, mouse)) return false;
+    g_edit.active = false;
+    g_overlay_h = 0;
+    g_overlay_rect = (Rect){ 0 };
+    return true;
+}
 
 // Пункты карточки выбора идут столбцом, а не рядом: это список, из
 // которого выбирают одно, а не ряд равноправных кнопок.
@@ -3487,6 +3505,7 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
     card.x = view.x + (view.w - card.w) / 2;
     card.y = view.y + 48;
     card.h = g_overlay_h > 0 ? g_overlay_h : (font->cell_height + 4) * 9;
+    g_overlay_rect = card;
 
     Ctx c = {
         .font = font, .theme = theme, .view = card, .mouse = mouse,
@@ -3622,10 +3641,26 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
 
 // --- все задачи ---------------------------------------------------------------
 
-// Строка обзора: имя проекта приглушённо, название полным цветом, справа
-// «проверить» или срок. Проект — там, где список идёт по всем проектам
-// сразу; внутри раздела проекта имя не повторяется.
-static Rect overview_row(Ctx *c, const char *proj, const AllTask *t, bool open, int indent)
+// Колонка имён проектов слева: по самому длинному видимому имени, не больше
+// 22 знаков. Без неё название задачи начиналось в каждой строке на своей
+// глубине, и список не читался сверху вниз; с колонкой это таблица.
+#define NAME_COL_MAX 22
+
+static const char *entry_label(const AllTasksEntry *e)
+{
+    return e->is_group ? "без проекта" : e->name;
+}
+
+static int name_col_px(const Ctx *c, int chars)
+{
+    if (chars > NAME_COL_MAX) chars = NAME_COL_MAX;
+    return (chars + 2) * c->font->cell_width;
+}
+
+// Строка обзора: имя проекта в левой колонке приглушённо (NULL — повтор
+// предыдущей строки, колонка пуста), название полным цветом, справа
+// «проверить» или срок.
+static Rect overview_row(Ctx *c, const char *proj, int col, const AllTask *t, bool open)
 {
     Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line + 6 };
     bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
@@ -3640,28 +3675,22 @@ static Rect overview_row(Ctx *c, const char *proj, const AllTask *t, bool open, 
            : u == 2 ? c->theme->badge_attention : c->theme->row_text_dim;
     }
     int hint_w = hint[0] ? chars_of(hint) * c->font->cell_width : 0;
-    int width = content_width(c) - indent - (hint_w ? hint_w + c->font->cell_width : 0);
-    int x = c->x + indent;
-    char head[PROJECT_NAME_MAX + 4] = "";
-    int head_w = 0;
-    if (proj) {
-        snprintf(head, sizeof(head), "%s · ", proj);
-        head_w = chars_of(head) * c->font->cell_width;
-        if (head_w > width / 2) head_w = width / 2;
-    }
+    int width = content_width(c) - col - (hint_w ? hint_w + c->font->cell_width : 0);
+    int x = c->x + col;
+
     // Раскрытая — с переносом: клик это просьба прочесть название целиком.
     // Высота нужна до подложки, поэтому сначала обмер, потом рисунок.
-    int lines = open ? draw_wrapped(c, t->title, x + head_w, width - head_w,
-                                    c->theme->row_text, false) : 1;
+    int lines = open ? draw_wrapped(c, t->title, x, width, c->theme->row_text, false) : 1;
     if (lines < 1) lines = 1;
     r.h = c->line * lines + 6;
     if (hover || open) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
-    if (head_w)
-        ui_text_clipped(c->font, head, x, c->y, c->theme->row_text_dim, head_w);
+    if (proj && col)
+        ui_text_clipped(c->font, proj, c->x, c->y, c->theme->row_text_dim,
+                        col - c->font->cell_width);
     if (open) {
-        draw_wrapped(c, t->title, x + head_w, width - head_w, c->theme->row_text, true);
+        draw_wrapped(c, t->title, x, width, c->theme->row_text, true);
     } else {
-        ui_text_clipped(c->font, t->title, x + head_w, c->y, c->theme->row_text, width - head_w);
+        ui_text_clipped(c->font, t->title, x, c->y, c->theme->row_text, width);
         c->y += c->line;
     }
     if (hint_w)
@@ -3674,22 +3703,20 @@ static Rect overview_row(Ctx *c, const char *proj, const AllTask *t, bool open, 
 // одному проекту и кнопки. События те же, что на странице проекта: адрес
 // списка — путь записи, номер списка — её номер в индексе.
 static void overview_task(Ctx *c, const Session *s, const AllTasksEntry *e, int ei,
-                          const AllTask *t, bool with_proj, int indent)
+                          const AllTask *t, const char *proj, int col)
 {
     bool open = s->page_task_sub == ei && s->page_task_open - 1 == t->index;
     c->list_cwd = e->path;
     c->list_sub = ei;
-    const char *pn = e->is_group ? "без проекта" : e->name;
-    Rect r = overview_row(c, with_proj ? pn : NULL, t, open, indent);
+    Rect r = overview_row(c, proj, col, t, open);
     if (c->click && inside(r, c->mouse) && visible_hit(c, c->mouse))
         set_event(c, PAGE_EVENT_TODO_TOGGLE, t->index, NULL);
     if (open) {
-        int body_indent = indent + c->font->cell_width * 4;
         const ProjectState *st = projstate_get(e->path);
         if (st && t->index < st->tasks.count && st->tasks.items[t->index].body[0])
-            task_body(c, st->tasks.items[t->index].body, body_indent);
+            task_body(c, st->tasks.items[t->index].body, col);
         row_begin(c);
-        c->row_x = c->x + body_indent;
+        c->row_x = c->x + col;
         if (t->state == TASK_REVIEW) {
             if (button(c, "Сделано", true)) {
                 set_event(c, PAGE_EVENT_TODO_STATE, t->index, NULL);
@@ -3716,15 +3743,42 @@ static void overview_task(Ctx *c, const Session *s, const AllTasksEntry *e, int 
     c->list_sub = -1;
 }
 
+// Заголовок группы: отбивка как у раздела, имя прописными приглушённо со
+// счётом задач, под ним черта цвета группы во всю колонку. Той же
+// строкой, что имена проектов, он терялся: глаз не находил границу.
+static void overview_group_head(Ctx *c, const char *group, int count, Color color)
+{
+    c->y += SP_SECTION;
+    char up[PROJECT_NAME_MAX * 2];
+    upper_utf8(up, sizeof(up), group[0] ? group : "прочее");
+    int hw = ui_text_clipped(c->font, up, c->x, c->y, c->theme->group_label,
+                             content_width(c));
+    char n[24];
+    snprintf(n, sizeof(n), " · %d", count);
+    ui_text_clipped(c->font, n, c->x + hw, c->y, c->theme->row_text_dim,
+                    content_width(c) - hw);
+    c->y += c->line;
+    DrawRectangle(c->x, c->y - 2, content_width(c), 1,
+                  color.a ? color : c->theme->sidebar_border);
+    c->y += SP_HEAD;
+}
+
 PageEvent page_draw_all_tasks(const Session *s, const AllTasks *a,
                               const FontAtlas *font, const Theme *theme,
                               Rect view, Vector2 mouse, int scroll)
 {
     Ctx c = ctx_begin(font, theme, view, mouse, scroll);
 
-    int with = 0;
-    for (int i = 0; i < a->count; i++)
-        if (a->items[i].open + a->items[i].review > 0) with++;
+    // Колонка имён одна на всю страницу: с шириной по разделу названия
+    // ехали от группы к группе, и столбец распадался на несколько.
+    int with = 0, chars = 0;
+    for (int i = 0; i < a->count; i++) {
+        const AllTasksEntry *e = &a->items[i];
+        if (e->open + e->review <= 0) continue;
+        with++;
+        if (chars_of(entry_label(e)) > chars) chars = chars_of(entry_label(e));
+    }
+    int col = name_col_px(&c, chars);
 
     text(&c, "Задачи", theme->row_text);
     char line[200];
@@ -3750,9 +3804,12 @@ PageEvent page_draw_all_tasks(const Session *s, const AllTasks *a,
                      "Посмотреть результат и отметить сделанной или вернуть.");
         for (int i = 0; i < a->count; i++) {
             const AllTasksEntry *e = &a->items[i];
-            for (int k = 0; k < e->count; k++)
-                if (e->items[k].state == TASK_REVIEW)
-                    overview_task(&c, s, e, i, &e->items[k], true, 0);
+            bool first = true;
+            for (int k = 0; k < e->count; k++) {
+                if (e->items[k].state != TASK_REVIEW) continue;
+                overview_task(&c, s, e, i, &e->items[k], first ? entry_label(e) : NULL, col);
+                first = false;
+            }
         }
     }
 
@@ -3779,18 +3836,23 @@ PageEvent page_draw_all_tasks(const Session *s, const AllTasks *a,
             section_help(&c, line, NULL,
                          "Открытые задачи со сроком — строка «срок: ГГГГ-ММ-ДД» в "
                          "описании. Ближайшие первыми, просроченные красным.");
-            for (int j = 0; j < n; j++)
+            for (int j = 0; j < n; j++) {
+                // Повтор имени в соседней строке — шум: в сортировке по
+                // дате соседи чаще из разных проектов, но не всегда.
+                const char *pn = j > 0 && de[j] == de[j - 1] ? NULL
+                               : entry_label(&a->items[de[j]]);
                 overview_task(&c, s, &a->items[de[j]], de[j],
-                              &a->items[de[j]].items[dk[j]], true, 0);
+                              &a->items[de[j]].items[dk[j]], pn, col);
+            }
         }
     }
 
     // --- В очереди: по группам в порядке панели, внутри — проекты --------
     snprintf(line, sizeof(line), "В очереди · %d", a->open);
     section_help(&c, line, NULL,
-                 "Открытые задачи по группам и проектам, как в панели. У проекта "
-                 "видна первая задача — та, за которую браться, — остальные под "
-                 "«ещё N». «Без проекта» — задачи папки группы.");
+                 "Открытые задачи по группам и проектам, как в панели. Имя проекта "
+                 "стоит у первой его задачи; у проекта с большим списком видны две "
+                 "первые, остальные под «ещё N». «Без проекта» — задачи папки группы.");
 
     // Группы — по первому появлению среди записей: проекты идут в порядке
     // панели, папки групп после них, но встают к своей группе.
@@ -3805,22 +3867,23 @@ PageEvent page_draw_all_tasks(const Session *s, const AllTasks *a,
         snprintf(seen[seen_n++], PROJECT_NAME_MAX, "%s", g);
 
         // Есть ли в группе что показывать: без этого заголовок висел бы над
-        // пустотой у каждой группы без задач.
-        int any = 0;
-        for (int k = 0; k < a->count; k++)
-            if (!strcmp(a->items[k].group, g) && a->items[k].open > 0) any++;
-        if (!any) continue;
-
-        c.y += SP_BLOCK;
-        char up[PROJECT_NAME_MAX * 2];
-        upper_utf8(up, sizeof(up), g[0] ? g : "прочее");
-        text(&c, up, theme->group_label);
+        // пустотой у каждой группы без задач. Цвет черты — от первого
+        // проекта группы, как в панели.
+        int total = 0;
+        Color color = { 0 };
+        for (int k = 0; k < a->count; k++) {
+            const AllTasksEntry *e = &a->items[k];
+            if (strcmp(e->group, g) || e->open <= 0) continue;
+            total += e->open;
+            if (!color.a && !e->is_group) color = e->color;
+        }
+        if (!total) continue;
+        overview_group_head(&c, g, total, color);
 
         // Папка группы первой: задачи без проекта стоят над проектами.
-        // Строка на задачу, как в «Проверить»: имя проекта впереди
-        // приглушённо, срок справа. Отдельная строка проекта с отступом
-        // под ней читалась лесенкой и тратила по три строки на задачу.
-        // У проекта с большим списком — две первые и складная «ещё N».
+        // Строка на задачу, как в «Проверить»; имя проекта только у первой
+        // его строки — повтор в соседних строках читался шумом. У проекта с
+        // большим списком две первые и складная «ещё N» в колонке названий.
         for (int pass = 0; pass < 2; pass++) {
             for (int k = 0; k < a->count; k++) {
                 const AllTasksEntry *e = &a->items[k];
@@ -3833,25 +3896,31 @@ PageEvent page_draw_all_tasks(const Session *s, const AllTasks *a,
                 for (int q = 0; q < e->count && shown < limit; q++) {
                     const AllTask *t = &e->items[q];
                     if (t->state != TASK_OPEN) continue;
-                    overview_task(&c, s, e, k, t, true, 0);
+                    overview_task(&c, s, e, k, t, shown == 0 ? entry_label(e) : NULL, col);
                     shown++;
                 }
                 if (e->open > 3) {
-                    char rest[PROJECT_NAME_MAX + 48];
-                    const char *pn = e->is_group ? "без проекта" : e->name;
-                    if (more) snprintf(rest, sizeof(rest), "%s · свернуть", pn);
-                    else      snprintf(rest, sizeof(rest), "%s · ещё %d", pn, e->open - shown);
+                    char rest[48];
+                    if (more) snprintf(rest, sizeof(rest), "свернуть");
+                    else      snprintf(rest, sizeof(rest), "ещё %d", e->open - shown);
+                    c.x += col;
+                    c.col_w -= col;
                     if (fold_row(&c, rest, NULL, more, theme->row_text_dim)) {
                         c.list_sub = k;
                         set_event(&c, PAGE_EVENT_TASKS_MORE, k, NULL);
                         c.list_sub = -1;
                     }
+                    c.x -= col;
+                    c.col_w += col;
                 }
                 if (more && e->open > e->count) {
                     snprintf(line, sizeof(line), "…в файле ещё %d, откройте проект",
                              e->open - shown);
+                    c.x += col;
                     text(&c, line, theme->row_text_dim);
+                    c.x -= col;
                 }
+                gap(&c, 1);
             }
         }
     }

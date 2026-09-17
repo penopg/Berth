@@ -186,6 +186,7 @@ void      page_mail_failed(const char *why);
 void      page_rename_begin(const char *path, const char *current, bool group);
 void      page_new_project_failed(const char *why);   // вернуть редактор с ошибкой
 bool      page_overlay_active(void);
+bool      page_overlay_dismiss(Vector2 mouse);
 // Окно просьбы агенту: контекст собирает берт (что за место, какие файлы),
 // слова пишет человек. Рисуется карточкой поверх окна, как новый проект.
 // hint — чем берт дополнит просьбу, сказанное человеку механикой; ctx —
