@@ -4,8 +4,15 @@
 #include <stdbool.h>
 
 #define MAILBOX_TABLE ".berth/data/inbox.tsv"
+#define JIRA_TABLE    ".berth/data/issues.tsv"
 
 // Заготовка почтового проекта: пустая таблица писем с заголовками
 // контракта mail.py, строка показа на странице и строка в реестре
 // документов. Пишет только то, чего ещё нет. false — не удалось записать.
 bool mailbox_scaffold(const char *dir);
+
+// Заготовка проекта Jira: таблица задач с заголовками контракта jira.py и
+// двумя колонками разбора, показ на странице с фильтром «не разобрано»,
+// кнопки «Обновить», «Разобрать» и «Новый список», строка в реестре и
+// jira.conf без секретов (адрес и логин). Пишет только то, чего ещё нет.
+bool jira_scaffold(const char *dir, const char *url, const char *login);

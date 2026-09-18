@@ -31,6 +31,7 @@ void settings_defaults(Settings *s)
     s->page_two_columns = true;
     s->collapsed_show_live = true;
     s->usage_fetch     = true;
+    s->journal_on_compact = true;
     s->ctx_warn        = 30;
     s->ctx_crit        = 60;
     s->sleep_after     = 30;
@@ -111,6 +112,8 @@ bool settings_load(Settings *s, const char *path)
                                  : s->open_project_page;
         else if (!strcmp(key, "usage_fetch"))
             s->usage_fetch = parse_bool(val, s->usage_fetch);
+        else if (!strcmp(key, "journal_on_compact"))
+            s->journal_on_compact = parse_bool(val, s->journal_on_compact);
         else if (!strcmp(key, "page_two_columns"))
             s->page_two_columns = parse_bool(val, s->page_two_columns);
         else if (!strcmp(key, "collapsed_show_live"))
@@ -206,6 +209,10 @@ bool settings_save(const Settings *s, const char *path)
         "# no — только из кэша Claude Code, который обновляется редко.\n"
         "usage_fetch = %s\n"
         "\n"
+        "# После сжатия контекста разговора собирать журнал и сводку проекта\n"
+        "# самим: задачами-вкладками на модели task_model. no — только по кнопкам.\n"
+        "journal_on_compact = %s\n"
+        "\n"
         "# Выключенные скиллы берта, через запятую (например berth-tasks).\n"
         "# Скиллы берта едут с ним и подключаются к каждому разговору; выключенный\n"
         "# не подключается.\n"
@@ -244,6 +251,7 @@ bool settings_save(const Settings *s, const char *path)
         s->page_two_columns ? "yes" : "no",
         s->collapsed_show_live ? "yes" : "no",
         s->usage_fetch ? "yes" : "no",
+        s->journal_on_compact ? "yes" : "no",
         s->skills_off, s->ctx_warn, s->ctx_crit, s->sleep_after, s->resume_within,
         s->forget_after, s->marker);
 

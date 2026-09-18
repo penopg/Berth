@@ -33,6 +33,9 @@ static ProjectState *slot_for(const char *cwd)
 
 static void load(ProjectState *st, const char *cwd)
 {
+    // Лента выделена на куче: набор вытесняется — память возвращается,
+    // иначе memset ниже забыл бы указатель.
+    journal_free(&st->journal);
     memset(st, 0, sizeof(*st));
     snprintf(st->cwd, sizeof(st->cwd), "%s", cwd);
     projinfo_load(&st->info, cwd);

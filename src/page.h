@@ -38,8 +38,13 @@ typedef enum {
     PAGE_EVENT_SET_MARKER,       // маркер активного разговора; text — dot или karateka
     PAGE_EVENT_UNHIDE_GROUP,     // вернуть скрытую группу; text — её имя
     PAGE_EVENT_TOGGLE_USAGE_FETCH, // лимиты: свой запрос или только кэш
+    PAGE_EVENT_TOGGLE_JOURNAL_AUTO, // журнал и сводка после сжатия сами или нет
     PAGE_EVENT_TOGGLE_BERTH_SKILL, // скилл берта включить/выключить; text — имя
     PAGE_EVENT_JOURNAL_TOGGLE,   // раскрыть или свернуть запись журнала; arg — номер
+    PAGE_EVENT_SECTION_TOGGLE,   // свернуть или раскрыть раздел страницы; text — ключ,
+                                 // arg — новое состояние (1 — раскрыт)
+    PAGE_EVENT_SECTION_GOTO,     // прокрутить к разделу; text — ключ, arg — смещение
+                                 // полосы в содержимом, arg2 — раскрыт ли сейчас
     PAGE_EVENT_JOURNAL_MENTION,  // упомянуть запись в разговоре проекта; arg — номер
     PAGE_EVENT_JOURNAL_DAY,      // свернуть или раскрыть день ленты; arg — ключ дня
     PAGE_EVENT_BUILD_JOURNAL,    // собрать журнал проекта скиллом
@@ -97,6 +102,8 @@ typedef enum {
 
     PAGE_EVENT_NEW_MAILBOX,      // подключить ящик: cwd — папка группы, title — адрес,
                                  // body — короткое имя (может быть пустым)
+    PAGE_EVENT_NEW_JIRA,         // подключить Jira: cwd — папка группы, title — адрес
+                                 // сайта, body — логин
     PAGE_EVENT_INTEGRATIONS_DIR, // выбрать папку группы интеграций (из карточки выбора)
     PAGE_EVENT_RENAME,           // своё имя в панели: cwd — путь группы или проекта,
                                  // title — имя (пустое — вернуть имя папки), arg — 1 у группы
@@ -181,6 +188,10 @@ void      page_integration_begin(const char *root, const char *group);
 void      page_mail_begin(const char *root, const char *group);
 // Не вышло завести — вернуть карточку с тем же текстом и причиной.
 void      page_mail_failed(const char *why);
+// Подключение Jira: два поля — адрес сайта и логин. Имя папки берт выводит
+// из адреса сайта.
+void      page_jira_begin(const char *root, const char *group);
+void      page_jira_failed(const char *why);
 // Переименование в панели: одно поле, имя только для панели. path — папка
 // группы или каталог проекта, current — как называется сейчас.
 void      page_rename_begin(const char *path, const char *current, bool group);

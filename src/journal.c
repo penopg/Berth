@@ -147,17 +147,34 @@ static void one_line(char *s)
     *w = '\0';
 }
 
+// Место под ещё одно событие: массив удваивается по мере роста. Нет
+// памяти — событие теряется молча, это лучше падения посреди кадра.
+static JournalEvent *journal_push(Journal *j)
+{
+    if (j->count >= j->cap) {
+        int cap = j->cap ? j->cap * 2 : 256;
+        JournalEvent *grown = realloc(j->events, sizeof(JournalEvent) * (size_t)cap);
+        if (!grown) return NULL;
+        j->events = grown;
+        j->cap = cap;
+    }
+    JournalEvent *e = &j->events[j->count++];
+    memset(e, 0, sizeof(*e));
+    return e;
+}
+
+void journal_free(Journal *j)
+{
+    free(j->events);
+    j->events = NULL;
+    j->count = j->cap = 0;
+}
+
 static void add_event(Journal *j, time_t when, JournalKind kind,
                       const char *sid, const char *text)
 {
-    if (j->count >= JOURNAL_EVENT_MAX) {
-        // Держим хвост: свежее важнее давнего, а места ровно столько.
-        memmove(&j->events[0], &j->events[1],
-                sizeof(j->events[0]) * (JOURNAL_EVENT_MAX - 1));
-        j->count = JOURNAL_EVENT_MAX - 1;
-        j->partial = true;
-    }
-    JournalEvent *e = &j->events[j->count++];
+    JournalEvent *e = journal_push(j);
+    if (!e) return;
     e->when = when;
     e->kind = kind;
     snprintf(e->session, sizeof(e->session), "%s", sid);
@@ -304,8 +321,8 @@ static void cache_read(Journal *j, Marks *m, const char *path)
         char *f3 = strchr(f2,  '\t'); if (!f3) continue; *f3++ = '\0';
         char *f4 = strchr(f3,  '\t'); if (!f4) continue; *f4++ = '\0';
 
-        if (j->count >= JOURNAL_EVENT_MAX) { j->partial = true; continue; }
-        JournalEvent *e = &j->events[j->count++];
+        JournalEvent *e = journal_push(j);
+        if (!e) break;
         e->when = (time_t)atol(tab);
         e->kind = (JournalKind)atoi(f2);
         snprintf(e->session, sizeof(e->session), "%s", f3);
@@ -420,13 +437,9 @@ static void read_recaps(Journal *j, const char *cwd)
         one_line(e.detail);
         clip_utf8(e.detail, JOURNAL_DETAIL_MAX - 8);
 
-        if (j->count >= JOURNAL_EVENT_MAX) {
-            memmove(&j->events[0], &j->events[1],
-                    sizeof(j->events[0]) * (JOURNAL_EVENT_MAX - 1));
-            j->count = JOURNAL_EVENT_MAX - 1;
-            j->partial = true;
-        }
-        j->events[j->count++] = e;
+        JournalEvent *slot = journal_push(j);
+        if (!slot) break;
+        *slot = e;
     }
     fclose(f);
 }
@@ -523,7 +536,9 @@ static void parse_tail(Journal *j, const char *path, const char *sid,
 
 void journal_load(Journal *j, const char *cwd)
 {
-    memset(j, 0, sizeof(*j));
+    // Массив остаётся: перечитывание по mtime идёт часто, а выделять его
+    // заново каждый раз незачем.
+    j->count = 0;
     if (!cwd || !*cwd) return;
 
     char dir[600];

@@ -29,6 +29,7 @@
 #include "groups.h"
 #include "integrations.h"
 #include "timers.h"
+#include "sections.h"
 #include "pending.h"
 #include "alltasks.h"
 #include "subprojects.h"
@@ -437,6 +438,88 @@ static const char *task_model_flag(App *app)
 // Упавшая остаётся: код выхода и хвост вывода — единственное, по чему
 // понять, что случилось. Если человек смотрел на задачу, уводим его в
 // разговор того же проекта, а не в случайную соседнюю вкладку.
+// Задача-вкладка, после которой активной остаётся прежняя вкладка: задачу
+// запускают кнопкой на странице или сам берт после сжатия, и уводить
+// человека в её терминал незачем — открыть можно по клику.
+static int open_task_quietly(App *app, int project, const char *cwd,
+                             const char *name, const char *cmd)
+{
+    int was = app->sessions.active;
+    int tab = open_task(app, project, cwd, name, cmd);
+    if (tab >= 0) {
+        session_activate(&app->sessions, was);
+        resize_all(app);
+        save_layout(app);
+    }
+    return tab;
+}
+
+// Сбор журнала скиллом. Права даём точечно: скиллу нужно запустить
+// extract.py и дописать journal.md. Без этого агент упирается в
+// подтверждение, а спросить его некому — задача идёт сама по себе.
+// Именно `-p`: задача должна кончиться сама. Интерактивный запуск
+// отрабатывал промпт и оставался в приглашении — работа сделана, а
+// вкладка вечно «работает». `--verbose` оставляет на экране ход работы.
+// `--no-session-persistence`: служебный вызов не должен оставлять в
+// истории проекта свой jsonl — иначе журнал пишет сам о себе.
+// chain — по успешному концу запустить сводку (после сжатия).
+static int start_journal_task(App *app, int project, const char *cwd, bool chain)
+{
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd),
+             "claude -p \"/project-journal\" --verbose --no-session-persistence%s "
+             "--permission-mode acceptEdits "
+             "--allowed-tools \"Bash(python3 *)\" Read Edit Write",
+             task_model_flag(app));
+    int tab = open_task_quietly(app, project, cwd, "журнал", cmd);
+    if (tab >= 0) app->sessions.items[tab].chain_summary = chain;
+    return tab;
+}
+
+// Сводка тем же способом. Ей нужны паспорт, код и история: чтение, поиск,
+// git log и конспект истории через python3 — и запись одного файла.
+static int start_summary_task(App *app, int project, const char *cwd)
+{
+    char cmd[640];
+    snprintf(cmd, sizeof(cmd),
+             "claude -p \"/project-summary\" --verbose --no-session-persistence%s "
+             "--permission-mode acceptEdits "
+             "--allowed-tools \"Bash(python3 *)\" \"Bash(git log*)\" "
+             "\"Bash(git status*)\" \"Bash(ls *)\" \"Bash(wc *)\" "
+             "Read Glob Grep Edit Write",
+             task_model_flag(app));
+    return open_task_quietly(app, project, cwd, "сводка", cmd);
+}
+
+// Идёт ли уже задача с таким именем у этого каталога.
+static bool task_running(const App *app, const char *cwd, const char *name)
+{
+    for (int i = 0; i < app->sessions.count; i++) {
+        const Session *t = &app->sessions.items[i];
+        if (t->role == SESSION_ROLE_TASK && session_has_term(t)
+            && !strcmp(t->cwd, cwd) && !strcmp(t->name, name)) return true;
+    }
+    return false;
+}
+
+// Сжатие прошло — журнал и сводка собираются сами. Флаг ставит опрос
+// jsonl (`session_track_ctx`), а запуск идёт здесь, в начале кадра, до
+// раскладки: список вкладок меняется только там. Хук Claude Code для
+// этого не нужен: его пришлось бы писать в чужой settings.json, и он
+// срабатывал бы у каждого claude, не только из берта.
+static void auto_journal(App *app)
+{
+    for (int i = 0; i < app->sessions.count; i++) {
+        Session *s = &app->sessions.items[i];
+        if (!s->compact_pending) continue;
+        s->compact_pending = false;
+        if (!app->settings.journal_on_compact) continue;
+        if (s->role != SESSION_ROLE_MAIN) continue;
+        if (task_running(app, s->cwd, "журнал")) continue;
+        start_journal_task(app, s->project, s->cwd, true);
+    }
+}
+
 static void reap_tasks(App *app)
 {
     double now = GetTime();
@@ -451,6 +534,11 @@ static void reap_tasks(App *app)
         if (app->sessions.active == i) {
             int home = session_of_project(&app->sessions, s->cwd);
             if (home >= 0) session_activate(&app->sessions, home);
+        }
+        // Журнал после сжатия дописан — теперь сводка, по свежему журналу.
+        if (s->chain_summary) {
+            s->chain_summary = false;
+            start_summary_task(app, s->project, s->cwd);
         }
         session_close(&app->sessions, i);
         resize_all(app);
@@ -1091,6 +1179,111 @@ static void handle_integrations_dir(App *app)
     page_integration_begin(dir, name);
 }
 
+// Имя папки проекта Jira — по хосту сайта: `company.atlassian.net` →
+// `jira-company`, `jira.company.com` → `jira-company`. Спрашивать имя у
+// человека незачем, а в панели его можно переименовать.
+static void jira_name(const char *url, char *out, size_t cap)
+{
+    const char *host = strstr(url, "://");
+    host = host ? host + 3 : url;
+    char h[256];
+    size_t n = strcspn(host, "/:");
+    if (n >= sizeof(h)) n = sizeof(h) - 1;
+    memcpy(h, host, n); h[n] = '\0';
+
+    const char *label = h;
+    const char *dot = strchr(h, '.');
+    if (dot && strstr(dot, ".atlassian.net") == dot) {
+        // Поддомен Atlassian — имя компании.
+        *(char *)dot = '\0';
+    } else {
+        // Свой хост: предпоследний ярлык, как у почты; «jira.company.com»
+        // даёт «company», не «jira».
+        const char *last = NULL, *prev = NULL;
+        for (const char *q = h; *q; q++)
+            if (*q == '.') { prev = last; last = q; }
+        if (prev) { label = prev + 1; *(char *)last = '\0'; }
+        else if (last) { *(char *)last = '\0'; }
+    }
+    if (!*label || !strcmp(label, "jira")) snprintf(out, cap, "%s", "Jira");
+    else snprintf(out, cap, "jira-%s", label);
+}
+
+// Подключение Jira: тот же ход, что у ящика, — проект, заготовка папки,
+// разговор с готовой репликой по скиллу berth-jira-connect.
+static void handle_new_jira(App *app, PageEvent ev)
+{
+    if (!ev.cwd || !ev.title || !ev.title[0]) return;
+    const char *login = ev.body && ev.body[0] ? ev.body : NULL;
+
+    char name[PROJECT_NAME_MAX];
+    jira_name(ev.title, name, sizeof(name));
+
+    char about[300];
+    if (login) snprintf(about, sizeof(about), "Jira %s, учётка %s", ev.title, login);
+    else       snprintf(about, sizeof(about), "Jira %s, токен приложения", ev.title);
+
+    char err[200];
+    if (!subprojects_create(ev.cwd, name, about, err, sizeof(err))) {
+        char why[280];
+        snprintf(why, sizeof(why), "%s — переименуйте или уберите прежнюю папку", err);
+        page_jira_failed(why);
+        return;
+    }
+
+    char dir[PROJECT_PATH_MAX];
+    snprintf(dir, sizeof(dir), "%s/%s", ev.cwd, name);
+    if (!jira_scaffold(dir, ev.title, login))
+        fprintf(stderr, "berth: не удалось заготовить таблицу задач Jira в %s\n", dir);
+    project_unhide(app, dir);
+
+    reload_projects(app);
+    int idx = projects_find_by_path(&app->projects, dir);
+    int tab = open_tab(app, idx, dir, agent_by_id("claude"),
+                       SESSION_KIND_PAGE, SESSION_PAGE_PROJECT);
+    if (tab < 0) return;
+    session_activate(&app->sessions, tab);
+    resize_all(app);
+
+    char who[400];
+    if (login) snprintf(who, sizeof(who), "учётка %s", login);
+    else       snprintf(who, sizeof(who), "у меня уже есть токен приложения (PAT), "
+                                          "логина нет — авторизация Bearer");
+    static char prompt[2600];
+    snprintf(prompt, sizeof(prompt),
+             "Подключи Jira %s к этому проекту, %s.\n"
+             "\n"
+             "Проект уже заведён: %s, адрес записан в .berth/jira.conf. "
+             "Работай по скиллу berth-jira-connect — в нём порядок: узнать у "
+             "сайта, Cloud это или Server, сказать мне, какой токен нужен и "
+             "где его взять, написать jira.py по контракту, проверить и "
+             "записать, как подключился.\n"
+             "\n"
+             "Токен сам не подставляй и не проси прислать текстом: скажи, "
+             "какую команду набрать мне, чтобы положить его в связку ключей, "
+             "и жди, пока я скажу, что готово.\n"
+             "\n"
+             "Когда чтение заработает — покажи пять моих задач: ключ, тема, "
+             "статус. По ним я пойму, тот ли это сайт и та ли учётка.\n"
+             "\n"
+             "Затем заполни таблицу: `python3 .berth/jira/jira.py обновить "
+             "--дней 30` (тридцать дней только в первый раз). Файл "
+             "`.berth/data/issues.tsv` с заголовками уже заведён и показан на "
+             "странице, кнопки над ним уже стоят — заводить заново и "
+             "переименовывать не надо. В конце предложи списки по моим "
+             "избранным фильтрам (`jira.py фильтры`) — каждый список это "
+             "подпроект, как описано в скилле.",
+             ev.title, who, dir);
+
+    uint16_t cols, rows;
+    grid_for(app->layout.term, &app->font, &cols, &rows);
+    Session *s = &app->sessions.items[tab];
+    session_start_term(s, agent_by_id("claude"), cols, rows,
+                       app->font.cell_width, app->font.cell_height, NULL, NULL);
+    queue_prompt(s, prompt);
+    save_layout(app);
+}
+
 static void handle_new_mailbox(App *app, PageEvent ev)
 {
     if (!ev.cwd || !ev.title || !ev.title[0]) return;
@@ -1238,6 +1431,7 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
 
     case PAGE_EVENT_NEW_PROJECT:
     case PAGE_EVENT_NEW_MAILBOX:
+    case PAGE_EVENT_NEW_JIRA:
     case PAGE_EVENT_INTEGRATIONS_DIR:
     case PAGE_EVENT_RENAME:
         // Приходят не со страницы, а из карточки над окном — handle_new_project,
@@ -1307,34 +1501,12 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         // нужно видеть, что там происходит, а при желании — остановить.
         // Страницу не отдаём: человек нажал кнопку на ней, а не просил
         // увести себя в терминал. Задача видна в списке, открыть — по клику.
-        int was = app->sessions.active;
-        // Права даём точечно: скиллу нужно запустить extract.py и дописать
-        // journal.md. Без этого агент упирается в подтверждение, а спросить
-        // его некому — задача идёт сама по себе.
-        // Именно `-p`: задача должна кончиться сама. Интерактивный запуск
-        // отрабатывал промпт и оставался в приглашении — работа сделана, а
-        // вкладка вечно «работает», и понять это можно было только войдя.
-        // `--verbose` оставляет на экране ход работы, а не один итог.
-        // `--no-session-persistence`: служебный вызов не должен оставлять
-        // в истории проекта свой jsonl — иначе журнал пишет сам о себе, а
-        // его записи приписываются сессии сбора, а не разговора.
-        char cmd[640];
-        snprintf(cmd, sizeof(cmd),
-                 "claude -p \"/project-journal\" --verbose --no-session-persistence%s "
-                 "--permission-mode acceptEdits "
-                 "--allowed-tools \"Bash(python3 *)\" Read Edit Write",
-                 task_model_flag(app));
-        int tab = open_task(app, s->project, s->cwd, "журнал", cmd);
-        if (tab >= 0) {
-            session_activate(&app->sessions, was);
-            resize_all(app);
-            save_layout(app);
+        if (start_journal_task(app, s->project, s->cwd, false) >= 0)
             snprintf(s->page_notice, sizeof(s->page_notice),
                      "Журнал собирается — задача видна в панели и на этой странице");
-        } else {
+        else
             snprintf(s->page_notice, sizeof(s->page_notice),
                      "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
-        }
         break;
     }
 
@@ -1457,6 +1629,21 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
 
     case PAGE_EVENT_JOURNAL_TOGGLE:
         s->page_journal_open = (s->page_journal_open == ev.arg + 1) ? 0 : ev.arg + 1;
+        break;
+
+    // Свёрнутость раздела — по проекту, у берта: выбор взгляда, а не
+    // свойство проекта. Пишется только перевёрнутое умолчание.
+    case PAGE_EVENT_SECTION_TOGGLE:
+        sections_set(s->cwd, ev.text, ev.arg != 0);
+        break;
+
+    // Чип раздела: свёрнутый раскрывается, страница уезжает к его полосе.
+    // Смещение — с прошлого кадра, и это верно: разделы выше него от
+    // раскрытия не двигаются. Предел прокрутки приложится на следующем
+    // кадре, когда раздел уже нарисован раскрытым.
+    case PAGE_EVENT_SECTION_GOTO:
+        if (!ev.arg2) sections_set(s->cwd, ev.text, true);
+        s->page_scroll = ev.arg > 8 ? ev.arg - 8 : 0;
         break;
 
     case PAGE_EVENT_JOURNAL_DAY: {
@@ -1896,29 +2083,13 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         break;
 
     case PAGE_EVENT_BUILD_SUMMARY: {
-        // Так же, как журнал: задачей-вкладкой, `-p`, права точечно. Сводке
-        // нужны паспорт, код и история: чтение, поиск, git log и конспект
-        // истории через python3 — и запись одного файла.
-        int was = app->sessions.active;
-        char cmd[640];
-        snprintf(cmd, sizeof(cmd),
-                 "claude -p \"/project-summary\" --verbose --no-session-persistence%s "
-                 "--permission-mode acceptEdits "
-                 "--allowed-tools \"Bash(python3 *)\" \"Bash(git log*)\" "
-                 "\"Bash(git status*)\" \"Bash(ls *)\" \"Bash(wc *)\" "
-                 "Read Glob Grep Edit Write",
-                 task_model_flag(app));
-        int tab = open_task(app, s->project, s->cwd, "сводка", cmd);
-        if (tab >= 0) {
-            session_activate(&app->sessions, was);
-            resize_all(app);
-            save_layout(app);
+        // Так же, как журнал: задачей-вкладкой, `-p`, права точечно.
+        if (start_summary_task(app, s->project, s->cwd) >= 0)
             snprintf(s->page_notice, sizeof(s->page_notice),
                      "Сводка пишется — задача видна в панели и на этой странице");
-        } else {
+        else
             snprintf(s->page_notice, sizeof(s->page_notice),
                      "Не удалось открыть задачу: вкладок уже %d", app->sessions.count);
-        }
         break;
     }
 
@@ -1970,6 +2141,11 @@ static void handle_page_event(App *app, Session *s, PageEvent ev)
         save_settings(app);
         // Включили — пусть спросит сразу, а не через три минуты.
         if (app->settings.usage_fetch) app->usage.last_spawn = 0;
+        break;
+
+    case PAGE_EVENT_TOGGLE_JOURNAL_AUTO:
+        app->settings.journal_on_compact = !app->settings.journal_on_compact;
+        save_settings(app);
         break;
 
     case PAGE_EVENT_UNHIDE_GROUP:
@@ -2773,6 +2949,9 @@ int main(int argc, char **argv)
         char timers_path[PROJECT_PATH_MAX];
         snprintf(timers_path, sizeof(timers_path), "%s/timers.tsv", config_dir());
         timers_init(timers_path);
+        char sections_path[PROJECT_PATH_MAX];
+        snprintf(sections_path, sizeof(sections_path), "%s/sections.tsv", config_dir());
+        sections_init(sections_path);
         xp_init(xp_path);
     }
     layout_compute(&app.layout, &app.projects, &app.sessions,
@@ -2831,6 +3010,7 @@ int main(int argc, char **argv)
         // без дела, в конце кадра.
         reap_tasks(&app);
         forget_stale_tabs(&app);
+        auto_journal(&app);
         term_reap_orphans();
         if (app.sessions.count == 0) break;
 
@@ -3130,6 +3310,8 @@ int main(int argc, char **argv)
             handle_new_project(&app, overlay_event);
         else if (overlay_event.kind == PAGE_EVENT_NEW_MAILBOX)
             handle_new_mailbox(&app, overlay_event);
+        else if (overlay_event.kind == PAGE_EVENT_NEW_JIRA)
+            handle_new_jira(&app, overlay_event);
         else if (overlay_event.kind == PAGE_EVENT_INTEGRATIONS_DIR)
             handle_integrations_dir(&app);
         else if (overlay_event.kind == PAGE_EVENT_RENAME)

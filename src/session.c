@@ -439,6 +439,17 @@ void session_track_ctx(Session *s)
     CtxInfo info;
     if (ctx_read(path, &info)) s->ctx = info;
 
+    // Новая граница сжатия — повод собрать журнал; первая увиденная только
+    // запоминается. Сравнение «позже», а не «не равно»: граница, ушедшая
+    // за хвост файла, даёт ноль, и это не новое сжатие.
+    if (!s->compact_tracked) {
+        s->compact_tracked = true;
+        s->compact_last = s->ctx.compacted_at;
+    } else if (s->ctx.compacted_at > s->compact_last) {
+        s->compact_last = s->ctx.compacted_at;
+        s->compact_pending = true;
+    }
+
     if (!s->spent_started) { s->spent_offset = -1; s->spent_started = true; }
     long spent = ctx_spent_since(path, &s->spent_offset, s->spent_last_id);
     s->tokens_out += spent;

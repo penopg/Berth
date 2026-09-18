@@ -11,6 +11,7 @@
 #include "skills_builtin.h"
 #include "actions.h"
 #include "timers.h"
+#include "sections.h"
 
 // Состояние вывода на время одного кадра: где рисуем, чем и что уже нажали.
 typedef struct {
@@ -36,6 +37,12 @@ typedef struct {
     // Чей список задач рисуем сейчас: события из него получают этот адрес.
     const char *list_cwd;
     int         list_sub;
+
+    // Раздел, чей заголовок рисуется следующим: ключ и раскрыт ли. Ставит
+    // sec_begin, читает и сбрасывает section_head: заголовок с ключом
+    // получает стрелку и сворачивается кликом по полосе.
+    const char *sec_key;
+    bool        sec_open;
 
     PageEvent event;
 } Ctx;
@@ -92,6 +99,16 @@ static int ctx_end(const Ctx *c)
 static int content_width(const Ctx *c)
 {
     return c->col_w;
+}
+
+// Ширина прозы: сводка, журнал, описания задач. Не больше 90 знаков — на
+// широком окне строка тянулась на 120, и глаз терял начало следующей.
+// Таблице и спискам с колонками нужна вся ширина, у них своя мера.
+static const int PROSE_CELLS = 90;
+static int prose_width(const Ctx *c)
+{
+    int w = c->col_w, max = c->font->cell_width * PROSE_CELLS;
+    return w < max ? w : max;
 }
 
 // Сколько знакомест займёт подпись: ширина кнопки и ссылки считается по ней.
@@ -154,11 +171,63 @@ static void tip_at(int x, int y, const char *text)
     snprintf(g_tip.text, sizeof(g_tip.text), "%s", text);
 }
 
+// Разделы страницы проекта, живущие между кадрами: ключ, заголовок, где
+// стоит и раскрыт ли. Ряд чипов под шапкой рисуется раньше разделов и
+// берёт их с прошлого кадра — как высота карточки над окном. Список свой
+// у каждого проекта: при смене вкладки он сбрасывается.
+#define SEC_MAX 16
+static struct {
+    char key[80];
+    char title[96];
+    int  offset;    // смещение полосы заголовка в содержимом страницы
+    bool open;
+    bool seen;      // встретился в этом кадре; не встретился — раздела нет
+} g_sec[SEC_MAX];
+static int  g_sec_n;
+static char g_sec_cwd[SESSION_PATH_MAX];
+
+static void sec_note(const Ctx *c, const char *key, const char *title, int bar_top,
+                     bool open)
+{
+    int k = -1;
+    for (int i = 0; i < g_sec_n; i++) if (!strcmp(g_sec[i].key, key)) k = i;
+    if (k < 0) {
+        if (g_sec_n == SEC_MAX) return;
+        k = g_sec_n++;
+        snprintf(g_sec[k].key, sizeof(g_sec[k].key), "%s", key);
+    }
+    // Подпись чипа — имя и первая приписка: «issues · 38 не разобрано»,
+    // без «· 38 записей». Чип должен быть коротким.
+    const char *m = strstr(title, " · ");
+    const char *m2 = m ? strstr(m + 3, " · ") : NULL;
+    snprintf(g_sec[k].title, sizeof(g_sec[k].title), "%.*s",
+             (int)(m2 ? m2 - title : (long)strlen(title)), title);
+    g_sec[k].offset = bar_top + c->scroll - c->scroll_top;
+    g_sec[k].open = open;
+    g_sec[k].seen = true;
+}
+
+// Раскрыт ли раздел: перевёрнутое человеком умолчание из файла берта,
+// иначе умолчание по содержимому. Ставит ключ для ближайшего section_head.
+static bool sec_begin(Ctx *c, const Session *s, const char *key, bool dflt)
+{
+    int v = sections_get(s->cwd, key);
+    bool open = v < 0 ? dflt : v == 1;
+    c->sec_key = key;
+    c->sec_open = open;
+    return open;
+}
+
+static void set_event(Ctx *c, PageEventKind kind, int arg, const char *text_arg);
+
 static int section_head(Ctx *c, const char *title, const char *const *acts, int n,
                         const char *help)
 {
     c->y += SP_SECTION;
     int w = content_width(c);
+    Rect bar = { c->x - 8, c->y - 4, w + 16, c->line + 8 };
+    bool foldable = c->sec_key != NULL;
+    bool busy = false;   // курсор над действием или подсказкой — не над полосой
     // Полоса, а не черта во всю ширину. Шесть одинаковых волосков через
     // равные промежутки читались гребёнкой — «здесь всё однородное», ровно
     // наоборот тому, что они должны говорить. Масса видна прищурившись,
@@ -177,20 +246,33 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
         ui_text_clipped(c->font, acts[i], r.x + 8, c->y,
                         hover ? c->theme->row_text : c->theme->row_text_dim, aw);
         if (hover && c->click) hit = i + 1;
+        if (hover) busy = true;
         right = r.x - 4;
     }
 
-    int room = right - c->x - 8;
+    // Складной раздел: стрелка перед именем, клик по полосе сворачивает.
+    // Свёрнутый остаётся полосой со счётом — обзор не теряется, а место
+    // под тем, что сейчас не нужно, освобождается.
+    int tx = c->x;
+    bool bar_hover = foldable && inside(bar, c->mouse) && visible_hit(c, c->mouse);
+    if (foldable) {
+        font_draw_codepoint(c->font, c->sec_open ? 0x25BE : 0x25B8, (float)c->x,
+                            (float)c->y, (float)c->font->size,
+                            bar_hover ? c->theme->row_text : c->theme->group_label);
+        tx += c->font->cell_width * 2;
+    }
+
+    int room = right - tx - 8;
     const char *meta = strstr(title, " · ");
     int tw = 0;
     if (meta) {
         char head[96];
         snprintf(head, sizeof(head), "%.*s", (int)(meta - title), title);
-        int hw = ui_text_clipped(c->font, head, c->x, c->y, c->theme->row_text, room);
-        tw = hw + ui_text_clipped(c->font, meta, c->x + hw, c->y, c->theme->row_text_dim,
+        int hw = ui_text_clipped(c->font, head, tx, c->y, c->theme->row_text, room);
+        tw = hw + ui_text_clipped(c->font, meta, tx + hw, c->y, c->theme->row_text_dim,
                                   room - hw);
     } else {
-        tw = ui_text_clipped(c->font, title, c->x, c->y, c->theme->row_text, room);
+        tw = ui_text_clipped(c->font, title, tx, c->y, c->theme->row_text, room);
     }
     // «(?)» после заголовка: что это за раздел, словами и только по запросу
     // глазами. Постоянная подпись под каждым разделом отняла бы по две
@@ -198,10 +280,11 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
     if (help) {
         // Кружок с вопросом рисуем примитивами: глиф такой формы есть только
         // в запасках, и промах дал бы «?» в рамке — ровно то, чего не надо.
-        int hx = c->x + tw + c->font->cell_width;
+        int hx = tx + tw + c->font->cell_width;
         int hr_px = c->font->cell_height / 2 - 1;
         Rect hit = { hx - 2, c->y, (float)hr_px * 2 + 6, c->line };
         bool hover = inside(hit, c->mouse) && visible_hit(c, c->mouse);
+        if (hover) busy = true;
         Color hc = hover ? c->theme->row_text : c->theme->row_text_dim;
         float cx = (float)hx + (float)hr_px + 1;
         float cy = (float)c->y + (float)c->font->cell_height / 2.0f;
@@ -209,6 +292,12 @@ static int section_head(Ctx *c, const char *title, const char *const *acts, int 
         font_draw_codepoint(c->font, '?', cx - (float)c->font->cell_width / 2.0f,
                             (float)c->y, (float)c->font->size, hc);
         if (hover) tip_at(hx, c->y, help);
+    }
+    if (foldable) {
+        if (bar_hover && !busy && c->click)
+            set_event(c, PAGE_EVENT_SECTION_TOGGLE, c->sec_open ? 0 : 1, c->sec_key);
+        sec_note(c, c->sec_key, title, bar.y, c->sec_open);
+        c->sec_key = NULL;
     }
     c->y += c->line;
     c->y += SP_HEAD;
@@ -480,17 +569,33 @@ static bool list_row_colored(Ctx *c, const char *left, const char *right,
 {
     // Сколько строк займёт содержание, знаем только отмерив: подсветка и
     // попадание мыши должны накрывать запись целиком, а не первую строку.
-    int width = content_width(c) - left_w;
+    int width = prose_width(c) - left_w;
     int lines = draw_wrapped(c, right, 0, width, color, false);
     if (lines < 1) lines = 1;
 
-    Rect r = { c->x - 8, c->y - 3, content_width(c) + 16, c->line * lines + 4 };
+    Rect r = { c->x - 8, c->y - 3, prose_width(c) + 16, c->line * lines + 4 };
     bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
     if (hover)
         DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
 
     ui_text_clipped(c->font, left, c->x, c->y, c->theme->row_text_dim, left_w);
     draw_wrapped(c, right, c->x + left_w, width, color, true);
+    return hover && c->click;
+}
+
+// Та же строка, но в одну линию с многоточием: реплика человека в ленте —
+// сырой промпт на три строки, а нужна от неё одна, с чего началось.
+static bool list_row_clipped(Ctx *c, const char *left, const char *right,
+                             int left_w, Color color)
+{
+    int width = prose_width(c) - left_w;
+    Rect r = { c->x - 8, c->y - 3, prose_width(c) + 16, c->line + 4 };
+    bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+    if (hover)
+        DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+    ui_text_clipped(c->font, left, c->x, c->y, c->theme->row_text_dim, left_w);
+    ui_text_clipped(c->font, right, c->x + left_w, c->y, color, width);
+    c->y += c->line;
     return hover && c->click;
 }
 
@@ -620,6 +725,8 @@ static struct {
     // Подключение ящика: те же два поля, но спрашивают адрес и короткое имя,
     // а не имя папки и описание. Папку берт назовёт сам, если имя не дали.
     bool mail;
+    // Подключение Jira: адрес сайта и логин, оба однострочные.
+    bool jira;
     // Переименование в панели: одно поле с именем. rename_group — группа,
     // а не проект: разница только в подписи карточки.
     bool renaming;
@@ -912,6 +1019,28 @@ void page_mail_begin(const char *root, const char *group)
     snprintf(g_edit.group, sizeof(g_edit.group), "%s", group ? group : "");
 }
 
+void page_jira_begin(const char *root, const char *group)
+{
+    edit_begin(root, -1, NULL);
+    g_edit.jira = true;
+    snprintf(g_edit.group, sizeof(g_edit.group), "%s", group ? group : "");
+}
+
+void page_jira_failed(const char *why)
+{
+    char url[TASK_TITLE_MAX], login[TASK_BODY_MAX];
+    char group[PROJECT_NAME_MAX], cwd[SESSION_PATH_MAX];
+    snprintf(url,   sizeof(url),   "%s", g_edit.title);
+    snprintf(login, sizeof(login), "%s", g_edit.body);
+    snprintf(group, sizeof(group), "%s", g_edit.group);
+    snprintf(cwd,   sizeof(cwd),   "%s", g_edit.cwd);
+    page_jira_begin(cwd, group);
+    snprintf(g_edit.title, sizeof(g_edit.title), "%s", url);
+    snprintf(g_edit.body,  sizeof(g_edit.body),  "%s", login);
+    snprintf(g_edit.notice, sizeof(g_edit.notice), "%s", why ? why : "");
+    g_edit.cursor = (int)strlen(g_edit.title);
+}
+
 void page_rename_begin(const char *path, const char *current, bool group)
 {
     edit_begin(path, -1, NULL);
@@ -939,7 +1068,7 @@ void page_mail_failed(const char *why)
 bool page_overlay_active(void)
 {
     return g_edit.active
-        && (g_edit.project || g_edit.asking || g_edit.picking || g_edit.mail
+        && (g_edit.project || g_edit.asking || g_edit.picking || g_edit.mail || g_edit.jira
             || g_edit.renaming);
 }
 
@@ -1020,8 +1149,8 @@ static int edit_keys(void)
         } else if (g_edit.field == 0) {
             g_edit.field = 1;
             g_edit.cursor = (int)strlen(g_edit.body);
-        } else if (g_edit.mail) {
-            // У ящика оба поля однострочные: Enter со второго — «готово».
+        } else if (g_edit.mail || g_edit.jira) {
+            // У ящика и у Jira оба поля однострочные: Enter со второго — «готово».
             return 1;
         } else {
             edit_insert("\n", 1);
@@ -1160,6 +1289,10 @@ static void draw_editor(Ctx *c, int indent)
         edit_field(c, 0, g_edit.title, false, "Адрес ящика — ivan@company.com", x, width);
         edit_field(c, 1, g_edit.body, false,
                    "Как назвать — не обязательно, по умолчанию по домену", x, width);
+    } else if (g_edit.jira) {
+        edit_field(c, 0, g_edit.title, false, "Адрес сайта — jira.company.com или company.atlassian.net", x, width);
+        edit_field(c, 1, g_edit.body, false,
+                   "Логин — почта учётки у Cloud; с PAT оставьте пустым", x, width);
     } else if (g_edit.project) {
         edit_field(c, 0, g_edit.title, false, "Имя папки проекта", x, width);
         edit_field(c, 1, g_edit.body, true, "О чём — одной строкой, попадёт в паспорт", x, width);
@@ -1253,6 +1386,32 @@ static void draw_editor(Ctx *c, int indent)
             }
             for (char *q = g_edit.body; *q; q++) if (*q == '\n') *q = ' ';
             set_event(c, PAGE_EVENT_NEW_MAILBOX, 0, g_edit.group);
+            c->event.cwd = g_edit.cwd;
+        } else if (g_edit.jira) {
+            // Адрес и логин проверяем здесь же: без них дальше идти некуда,
+            // а вернуть человека к полю дешевле, чем завести пустой проект.
+            rtrim_inplace(g_edit.title);
+            rtrim_inplace(g_edit.body);
+            // Схему человек писать не обязан: «jira.mts.ai» — тоже адрес.
+            // Без схемы подставляем https, хвостовой «/» срезаем.
+            if (strncmp(g_edit.title, "https://", 8) && strncmp(g_edit.title, "http://", 7)) {
+                char with[TASK_TITLE_MAX];
+                snprintf(with, sizeof(with), "https://%s", g_edit.title);
+                snprintf(g_edit.title, sizeof(g_edit.title), "%s", with);
+            }
+            for (size_t n = strlen(g_edit.title); n > 9 && g_edit.title[n - 1] == '/'; n--)
+                g_edit.title[n - 1] = '\0';
+            const char *host = strstr(g_edit.title, "://") + 3;
+            if (!*host || strchr(host, ' ')) {
+                snprintf(g_edit.notice, sizeof(g_edit.notice),
+                         "Нужен адрес сайта, например jira.company.com");
+                g_edit.field = 0;
+                g_edit.cursor = (int)strlen(g_edit.title);
+                return;
+            }
+            // Логин не обязателен: у токена приложения (PAT, Jira Server) он
+            // не нужен, авторизация идёт одним заголовком Bearer.
+            set_event(c, PAGE_EVENT_NEW_JIRA, 0, g_edit.group);
             c->event.cwd = g_edit.cwd;
         } else if (g_edit.project) {
             for (char *q = g_edit.body; *q; q++) if (*q == '\n') *q = ' ';
@@ -1401,7 +1560,7 @@ static void body_text(Ctx *c, const char *body, int indent, Color color)
         }
         if ((blank || !nl) && used) {
             para[used] = '\0';
-            draw_wrapped(c, para, c->x + indent, content_width(c) - indent,
+            draw_wrapped(c, para, c->x + indent, prose_width(c) - indent,
                          color, true);
             used = 0;
             if (blank) gap(c, 1);
@@ -1710,6 +1869,7 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
     char head[64];
     if (grp) snprintf(head, sizeof(head), subs ? "Проекты · %d" : "Проекты", subs);
     else     snprintf(head, sizeof(head), subs ? "Подпроекты · %d" : "Подпроекты", subs);
+    bool unfolded = sec_begin(c, s, "subs", true);
     section_help(c, head, NULL, grp
                  ? "Проекты этой группы с их задачами. Разговор со страницы "
                    "группы — для задачи, у которой проекта ещё нет: агент "
@@ -1718,6 +1878,7 @@ static void draw_subprojects(Ctx *c, const Session *s, const ProjectList *projec
                    "разговор с агентом, свои задачи и паспорт. Берт находит их "
                    "по истории Claude Code, CLAUDE.md или .berth внутри; "
                    "исключения — в .berth/subprojects.tsv.");
+    if (!unfolded) return;
 
     int q = 0;
     for (int k = 0; projects && k < projects->count; k++) {
@@ -1846,6 +2007,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
     // контекст (какие кнопки есть, какие таблицы в проекте) берт
     // подставляет сам — человеку набирать это незачем.
     const char *acts[2] = { al->exists ? "Править файл" : NULL, "Попросить" };
+    bool unfolded = sec_begin(c, s, "actions", false);
     int hit = section_head(c, head, acts, 2,
                      "Кнопки над данными: клик собирает реплику из шаблона и "
                      "отправляет её агенту — задачей, если правка идёт в файл, "
@@ -1877,6 +2039,7 @@ static void draw_actions_section(Ctx *c, const Session *s, const ProjectState *s
                        "Перечислять это словами не нужно — хватит сказать, что "
                        "должно получиться.", ctx);
     }
+    if (!unfolded) return;
 
     // Мини-таблица с шапкой. Плашка-имя врала: выглядела кнопкой, а нажать
     // её было нельзя. Список записей с полями и должен выглядеть списком
@@ -2030,11 +2193,13 @@ static void draw_skills(Ctx *c, const Session *s, const ProjectList *projects)
 
     char title[64];
     snprintf(title, sizeof(title), sl->count ? "Скиллы проекта · %d" : "Скиллы проекта", sl->count);
+    bool unfolded = sec_begin(c, s, "skills", false);
     section_help(c, title, NULL,
                  "Скилл — процедура с условием запуска: агент сам решает по "
                  "описанию, что она нужна. Живёт в .claude/skills, уезжает с "
                  "кодом, подпроекты его наследуют. Скиллы берта и личные из "
                  "~/.claude/skills здесь не показаны — они в настройках (⌘,).");
+    if (!unfolded) return;
 
     const int cw = c->font->cell_width;
     int open_idx = s->page_skill_open - 1;
@@ -2130,11 +2295,13 @@ static void draw_files(Ctx *c, const Session *s, const FileList *fl)
     else
         snprintf(title, sizeof(title), fl->count ? "Документы · %d" : "Документы",
                  fl->count);
+    bool unfolded = sec_begin(c, s, "files", true);
     section_help(c, title, NULL,
                  "Файлы проекта, сделанные для чтения человеком: документы, "
                  "таблицы, отчёты, картинки. Пояснения берутся из "
                  ".berth/files.tsv — их пишет агент по скиллу berth-files; "
                  "сами файлы берт находит обходом папки.");
+    if (!unfolded) return;
 
     const int cw = c->font->cell_width;
     const Theme *th = c->theme;
@@ -2340,6 +2507,34 @@ static Rect chip(Ctx *c, const char *label, bool on, bool lifted)
                         on ? c->theme->row_text : c->theme->row_text_dim, r.w - 16);
     }
     c->row_x = r.x + r.w + 8;
+    return r;
+}
+
+// Таб раздела под шапкой: слово, у раскрытого раздела полным цветом и с
+// акцентным подчёркиванием, у свёрнутого приглушённо. Не чип и не кнопка
+// намеренно: залитые плашки того же цвета, что полосы разделов и главная
+// кнопка, ни от того, ни от другого не отличались — первая версия ряда
+// нарушала правило «залитая плашка на странице одна».
+static Rect tab(Ctx *c, const char *label, bool on)
+{
+    int chars = chars_of(label);
+    int cw = c->font->cell_width;
+    Rect r = { c->row_x, c->y, chars * cw + 16, c->font->cell_height + 10 };
+    int home = c->row_home ? c->row_home : c->x;
+    if (r.x + r.w > c->x + content_width(c) && c->row_x > home) {
+        c->y += r.h + 4;
+        c->row_x = home;
+        r.x = home;
+        r.y = c->y;
+    }
+    c->row_used = true;
+
+    bool hover = inside(r, c->mouse) && visible_hit(c, c->mouse);
+    if (hover) DrawRectangle(r.x, r.y, r.w, r.h, c->theme->row_hover_bg);
+    ui_text_clipped(c->font, label, r.x + 8, r.y + 5,
+                    on || hover ? c->theme->row_text : c->theme->row_text_dim, r.w - 16);
+    if (on) DrawRectangle(r.x + 8, r.y + r.h - 2, r.w - 16, 2, c->theme->progress_fill);
+    c->row_x = r.x + r.w + cw;
     return r;
 }
 
@@ -2603,9 +2798,13 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
                  plural3(t->file_rows, "запись", "записи", "записей"));
     else
         snprintf(head, sizeof(head), "%s", t->name);
+    char key[96];
+    snprintf(key, sizeof(key), "t:%s", t->name);
+    bool unfolded = sec_begin(c, s, key, true);
     int act = section_action2(c, head, "Открыть", "Настроить");
     if (act == 1) set_event(c, PAGE_EVENT_TABLE_OPEN, idx, NULL);
     if (act == 2) set_event(c, PAGE_EVENT_TABLE_CFG, idx, NULL);
+    if (!unfolded) return;
 
     if (!t->exists) {
         text(c, "таблица не читается — файла нет или в нём нет заголовков",
@@ -2624,7 +2823,38 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     int col[TABLE_COLS_MAX], w[TABLE_COLS_MAX];
     int cols = 0, used = 0, chosen = 0;
     int main = t->main_col;
-    bool main_shown = main >= 0 && t->col_show[main];
+
+    // Колонка, пустая во всех показанных записях, не рисуется: под фильтром
+    // «разбор пусто» колонка «разбор» пуста по определению, и три пустых
+    // столбца справа съедали треть ширины, не говоря ничего. В раскрытой
+    // записи она есть; имена — строкой под таблицей. Все пустые — прятать
+    // нечего, иначе таблица исчезла бы целиком.
+    bool blank[TABLE_COLS_MAX] = { false };
+    int blanks = 0, shown_cols = 0;
+    char blank_names[256] = "";
+    if (t->row_count > 0) {
+        for (int i = 0; i < t->col_count; i++) {
+            if (!t->col_show[i]) continue;
+            shown_cols++;
+            bool empty = true;
+            for (int r = 0; r < t->row_count && empty; r++) {
+                if (t->filter_col >= 0 && !t->row_pass[r]) continue;
+                if (t->cells[r][i][0]) empty = false;
+            }
+            if (!empty) continue;
+            blank[i] = true;
+            blanks++;
+            size_t n = strlen(blank_names);
+            snprintf(blank_names + n, sizeof(blank_names) - n, "%s%s",
+                     n ? ", " : "", t->cols[i]);
+        }
+        if (blanks == shown_cols) {
+            memset(blank, 0, sizeof(blank));
+            blanks = 0;
+            blank_names[0] = '\0';
+        }
+    }
+    bool main_shown = main >= 0 && t->col_show[main] && !blank[main];
 
     // Сколько заняли бы узкие сами по себе — от этого зависит, влезет ли
     // главная в строку. Не влезает средняя ячейка — второй этаж; от 60
@@ -2632,7 +2862,7 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     int narrow = 0;
     for (int k = 0; k < t->col_count; k++) {
         int i = t->col_order[k];
-        if (!t->col_show[i] || i == main) continue;
+        if (!t->col_show[i] || blank[i] || i == main) continue;
         int cwid = t->col_chars[i];
         if (cwid > 24) cwid = 24;
         if (cwid < 3) cwid = 3;
@@ -2648,7 +2878,7 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     int main_k = -1;
     for (int k = 0; k < t->col_count; k++) {
         int i = t->col_order[k];   // порядок показа, а не порядок файла
-        if (!t->col_show[i]) continue;
+        if (!t->col_show[i] || blank[i]) continue;
         chosen++;
         if (i == main) {
             if (two) continue;                 // пойдёт вторым этажом
@@ -2941,10 +3171,25 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
     // Что не влезло в ширину, из списка выпало молча — об этом надо сказать,
     // иначе колонка выглядит потерянной. Скрытая настройкой — выбор
     // человека, о ней не напоминаем.
-    if (cols + (two ? 1 : 0) < chosen || t->wide)
+    // Отброшенные при чтении — отдельно от не влезших в ширину: первые не
+    // видны нигде, даже в раскрытой записи, и «не влезли» про них врало бы.
+    if (t->file_cols > t->col_count) {
+        char note[160];
+        snprintf(note, sizeof(note),
+                 "в файле %d колонок, берт читает первые %d — остальные не показываются",
+                 t->file_cols, t->col_count);
+        text(c, note, th->badge_attention);
+    }
+    if (blanks > 0) {
+        char note[320];
+        snprintf(note, sizeof(note), "пустые у показанных записей не рисуются: %s",
+                 blank_names);
+        text(c, note, th->row_text_dim);
+    }
+    if (cols + (two ? 1 : 0) < chosen)
         text(c, "не все колонки влезли — клик по записи показывает её целиком",
              th->row_text_dim);
-    else if (chosen < t->col_count)
+    else if (chosen + blanks < t->col_count)
         text(c, "часть колонок скрыта настройкой — клик по записи показывает всё",
              th->row_text_dim);
 }
@@ -2954,15 +3199,17 @@ static void draw_table(Ctx *c, const Session *s, const ActionList *al,
 // там, где CLAUDE.md не заводили. Пока сводки нет, показываем статус из
 // паспорта — это хоть какой-то ориентир, но он про последние действия, а
 // за ними лучше идти в журнал. Действие «Собрать»/«Обновить» — в заголовке.
-static void draw_summary(Ctx *c, const ProjInfo *info)
+static void draw_summary(Ctx *c, const Session *s, const ProjInfo *info)
 {
     const Theme *theme = c->theme;
+    bool unfolded = sec_begin(c, s, "summary", true);
     if (info->has_summary) {
         char age[48], head[96];
         projinfo_age(info->summary_mtime, age, sizeof(age));
         snprintf(head, sizeof(head), "Сводка · %s", age);
         if (section_action(c, head, "Обновить сводку"))
             set_event(c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
+        if (!unfolded) return;
         c->y -= c->line / 2;   // абзацы отбиваются сами
 
         // Три абзаца с подписями «Что это», «Где сейчас», «Дальше». Подпись
@@ -2996,7 +3243,7 @@ static void draw_summary(Ctx *c, const ProjInfo *info)
                     break;
                 }
                 if (body == para) gap(c, 1);
-                draw_wrapped(c, body, c->x, content_width(c), theme->row_text, true);
+                draw_wrapped(c, body, c->x, prose_width(c), theme->row_text, true);
                 used = 0;
             }
             if (!nl) break;
@@ -3006,6 +3253,7 @@ static void draw_summary(Ctx *c, const ProjInfo *info)
         if (section_action(c, info->has_claude_md ? "Статус · CLAUDE.md" : "Статус",
                            "Собрать сводку"))
             set_event(c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
+        if (!unfolded) return;
         int status_max = info->status_lines < 4 ? info->status_lines : 4;
         for (int i = 0; i < status_max; i++)
             text(c, info->status[i], theme->row_text_dim);
@@ -3013,6 +3261,7 @@ static void draw_summary(Ctx *c, const ProjInfo *info)
     } else {
         if (section_action(c, "Сводка", "Собрать сводку"))
             set_event(c, PAGE_EVENT_BUILD_SUMMARY, 0, NULL);
+        if (!unfolded) return;
         text(c, info->has_claude_md
              ? "Сводки ещё нет — её соберёт действие в заголовке"
              : "CLAUDE.md нет, сводки нет — «Собрать сводку» восстановит её из истории",
@@ -3044,10 +3293,12 @@ static bool day_open(const Session *s, int key, int rank)
 // ничего не значат. Значат — дни, часы и то, о чём он тогда просил. Дни
 // складные: у живого проекта лента на сотни строк, а нужен обычно вчерашний
 // и сегодняшний; остальные стоят заголовками со счётом.
-static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const ProjInfo *info)
+static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const ProjInfo *info,
+                         bool dflt_open)
 {
     const Theme *theme = c->theme;
     const FontAtlas *font = c->font;
+    bool unfolded = sec_begin(c, s, "journal", dflt_open);
 
     int recaps = 0, days = 0, last_key = -1;
     for (int i = 0; i < jr->count; i++) {
@@ -3067,17 +3318,15 @@ static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const Proj
     else          snprintf(head, sizeof(head), "Журнал работы");
     if (section_action(c, head, recaps > 0 ? "Обновить журнал" : "Собрать журнал"))
         set_event(c, PAGE_EVENT_BUILD_JOURNAL, 0, NULL);
+    if (!unfolded) return;
 
     if (jr->count == 0) {
         text(c, "Здесь ещё не работали", theme->row_text_dim);
         return;
     }
 
-    // Рисуем ленту целиком: страница прокручивается, и обрезать её по
-    // высоте окна больше незачем — колесом человек уходит в любой день.
-    if (jr->partial)
-        text(c, "…более раннее в ленту не поместилось", theme->row_text_dim);
-
+    // Лента целиком, предела нет: страница прокручивается, старые дни
+    // свёрнуты, и колесом человек уходит в любой день.
     int time_w = font->cell_width * 8;
     last_key = -1;
     int day_idx = 0;
@@ -3139,13 +3388,21 @@ static void draw_journal(Ctx *c, const Session *s, const Journal *jr, const Proj
         // это начало задачи, итог — чем она кончилась.
         Color tone = ev->kind == JOURNAL_RECAP ? theme->row_text : theme->row_text_dim;
         int row_top = c->y;
-        bool hit = list_row_colored(c, stamp, ev->text, time_w, tone);
-
-        // Расшифровка идёт под сутью, с отступом в ту же колонку: строка
-        // читается как «время — что сделали», а под ней подробность.
-        if (ev->detail[0])
-            draw_wrapped(c, ev->detail, c->x + time_w,
-                         content_width(c) - time_w, theme->row_text_dim, true);
+        bool opened = s->page_journal_open == i + 1;
+        bool hit;
+        if (ev->kind == JOURNAL_RECAP || opened) {
+            hit = list_row_colored(c, stamp, ev->text, time_w, tone);
+            // Расшифровка идёт под сутью, с отступом в ту же колонку: строка
+            // читается как «время — что сделали», а под ней подробность.
+            if (ev->detail[0])
+                draw_wrapped(c, ev->detail, c->x + time_w,
+                             prose_width(c) - time_w, theme->row_text_dim, true);
+        } else {
+            // Реплика — одной строкой: это начало задачи, и в ленте от неё
+            // нужно «с чего началось», а не три строки сырого промпта.
+            // Целиком — по клику, как итог.
+            hit = list_row_clipped(c, stamp, ev->text, time_w, tone);
+        }
 
         // Клик раскрывает запись, а не поднимает старую сессию: разговор
         // у проекта один, и вернуться к обсуждению значит напомнить о нём
@@ -3324,6 +3581,33 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
         row_end(&c);
     }
 
+    // Разделы — чипами под шапкой, на месте: клик прокручивает к разделу и
+    // раскрывает его. Это табы, которые ничего не прячут: полосы заголовков
+    // со счётом остаются на странице, и обзор «что ждёт» не теряется.
+    // Список — с прошлого кадра, поэтому у другого проекта сбрасывается, а
+    // высота ряда держится и без чипов: иначе страница дёрнулась бы на
+    // втором кадре.
+    if (strcmp(g_sec_cwd, s->cwd)) {
+        snprintf(g_sec_cwd, sizeof(g_sec_cwd), "%s", s->cwd);
+        g_sec_n = 0;
+    }
+    gap(&c, 1);
+    row_begin(&c);
+    c.row_x -= 8;   // слово таба стоит вровень с текстом шапки, рамка шире на отступ
+    for (int i = 0; i < g_sec_n; i++) {
+        Rect r = tab(&c, g_sec[i].title, g_sec[i].open);
+        if (c.click && inside(r, c.mouse)) {
+            set_event(&c, PAGE_EVENT_SECTION_GOTO, g_sec[i].offset, g_sec[i].key);
+            c.event.arg2 = g_sec[i].open ? 1 : 0;
+        }
+        g_sec[i].seen = false;
+    }
+    c.y += font->cell_height + 10 + 6;
+    // Волосок под рядом: здесь кончается закреплённая шапка и начинается
+    // прокрутка — граница, которую стоит видеть.
+    DrawRectangle(c.x, c.y, content_width(&c), 1, theme->sidebar_border);
+    c.y += 2;
+
     gap(&c, 1);
     scroll_begin(&c);
 
@@ -3342,15 +3626,15 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
     int right_w = full - left_w - gutter;
     c.col_w = left_w;
 
-    draw_summary(&c, info);
-
-    // Показанные таблицы — между сводкой и журналом, в широкой колонке:
-    // таблице нужна ширина, а справа она встала бы в 2/5 экрана и
-    // растеряла бы колонки.
+    // Показанные таблицы — первыми, в широкой колонке: у проекта с таблицей
+    // (ящик, Jira) она и есть главное, а статус из паспорта над ней был
+    // служебным логом агента. Справа она встала бы в 2/5 экрана и
+    // растеряла бы колонки. Журнал у такого проекта свёрнут по умолчанию.
     for (int i = 0; i < st->table_count; i++)
         draw_table(&c, s, &st->actions, &st->tables[i], i);
 
-    draw_journal(&c, s, &st->journal, info);
+    draw_summary(&c, s, info);
+    draw_journal(&c, s, &st->journal, info, st->table_count == 0);
 
     int left_end = c.y;
     if (wide) {
@@ -3377,8 +3661,9 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 
     char tasks_head[64];
     tasks_title(&st->tasks, "Задачи", tasks_head, sizeof(tasks_head));
+    bool tasks_open = sec_begin(&c, s, "tasks", true);
     section(&c, tasks_head);
-    draw_tasks(&c, s, &st->tasks, s->cwd, -1);
+    if (tasks_open) draw_tasks(&c, s, &st->tasks, s->cwd, -1);
 
     // Подпроекты — после своих задач, свёрнутыми разделами.
     draw_subprojects(&c, s, projects);
@@ -3406,6 +3691,15 @@ PageEvent page_draw_project(const Session *s, const ProjectState *st,
 
     // Балун — последним: всё, что нарисовано после него, его бы перекрыло.
     draw_tip(&c);
+
+    // Раздел, которого в этом кадре не было (таблицу сняли со страницы),
+    // из списка чипов уходит.
+    {
+        int n = 0;
+        for (int i = 0; i < g_sec_n; i++)
+            if (g_sec[i].seen) g_sec[n++] = g_sec[i];
+        g_sec_n = n;
+    }
 
     revealed_end();
     c.event.scroll_top = c.scroll_top;
@@ -3562,11 +3856,33 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
             return c.event;
         }
         pick_break(&c);
+        gap(&c, 1);
+
+        text(&c, "Jira", theme->row_text);
+        draw_wrapped(&c, "Подключите Jira, чтобы видеть свои задачи на странице, разбирать "
+                         "их с агентом в задачи проектов и отписываться в Jira по итогам. "
+                         "Списки по JQL заводятся подпроектами.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        gap(&c, 1);
+        draw_wrapped(&c, "Что нужно: адрес сайта, логин и токен — API-токен у Atlassian "
+                         "Cloud или личный токен у Jira Server. Токен вы положите в связку "
+                         "ключей сами, командой, которую покажет агент.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        gap(&c, 1);
+
+        if (button_kind(&c, "Подключить Jira", BTN_ACCENT)) {
+            char root[SESSION_PATH_MAX], group[PROJECT_NAME_MAX];
+            snprintf(root, sizeof(root), "%s", g_edit.cwd);
+            snprintf(group, sizeof(group), "%s", g_edit.group);
+            page_jira_begin(root, group);
+            return c.event;
+        }
+        pick_break(&c);
 
         gap(&c, 1);
         // Чего ещё нет — строкой, а не рамками: пункт в рамке выглядит
         // нажимаемым, а нажать его нельзя.
-        text(&c, "Скоро: календарь, Jira, Confluence", theme->row_text_dim);
+        text(&c, "Скоро: календарь, Confluence", theme->row_text_dim);
         gap(&c, 1);
 
         // Где лежат проекты подключённого — свойство группы, а не ящика:
@@ -3613,6 +3929,15 @@ PageEvent page_draw_overlay(const FontAtlas *font, const Theme *theme,
         // Имя и папка — разные вещи: папку не трогаем, история Claude Code
         // привязана к её пути.
         text(&c, "Имя только для панели: папка на диске не меняется", theme->row_text_dim);
+    } else if (g_edit.jira) {
+        text(&c, "Подключение Jira", theme->row_text);
+        draw_wrapped(&c, "Сайт станет проектом: ваши задачи в таблице, списки по JQL "
+                         "подпроектами. Cloud или Server агент определит сам и скажет, "
+                         "какой токен нужен и как положить его в связку ключей. Логин "
+                         "нужен только API-токену Cloud; с токеном приложения (PAT) "
+                         "поле оставьте пустым.",
+                     c.x, content_width(&c), theme->row_text_dim, true);
+        if (g_edit.notice[0]) text(&c, g_edit.notice, theme->badge_dead);
     } else if (g_edit.mail) {
         text(&c, "Подключение почты", theme->row_text);
         draw_wrapped(&c, "Ящик станет проектом: письма в таблице, вложения в документах. "
@@ -4106,6 +4431,14 @@ PageEvent page_draw_settings(const Settings *st, const Groups *groups,
         snprintf(line, sizeof(line),
                  "Журнал и сводку собирает модель Claude Code по умолчанию (task_model пуст).");
     setting_note(&c, line);
+    setting_end(&c);
+
+    setting_begin(&c, "Журнал после сжатия");
+    if (toggle(&c, st->journal_on_compact))
+        set_event(&c, PAGE_EVENT_TOGGLE_JOURNAL_AUTO, 0, NULL);
+    setting_note(&c, "Когда разговор проекта сжал контекст, берт сам собирает журнал, "
+                     "а по его концу — сводку: задачами-вкладками, как по кнопкам на "
+                     "странице. Выключено — только по кнопкам.");
     setting_end(&c);
 
     // --- Лимиты ------------------------------------------------------------

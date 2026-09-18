@@ -216,6 +216,7 @@ void table_load(Table *t, const char *cwd, const char *rel)
             int taken = 0;
             int total = split(p, t->cols, &taken);
             t->col_count = taken;
+            t->file_cols = total;
             t->wide = total > taken;
             for (int i = 0; i < t->col_count; i++) {
                 t->col_chars[i] = chars_of(t->cols[i]);

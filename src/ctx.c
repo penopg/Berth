@@ -152,6 +152,7 @@ static bool scan(char *buf, long from, CtxInfo *out)
             // единственная верная цифра — usage последнего ответа рассказывает
             // про контекст, которого уже нет. Окно остаётся от последнего
             // ответа; если его в хвосте не было, берётся окно по умолчанию.
+            best.compacted_at = field_time(line);
             long post = field_long(line, "\"postTokens\"");
             if (post > 0) {
                 best.used = post;

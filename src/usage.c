@@ -235,9 +235,15 @@ void usage_load(Usage *u)
 // временный файл, чтобы берт не прочитал половину. Ошибка HTTP (`-f`) —
 // файл не трогается, остаётся прошлый ответ; стандартный поток ошибок — в
 // usage.log рядом, чтобы было куда посмотреть, когда «не работает».
+// Токен — именно `claudeAiOauth.accessToken`, разбором JSON. Первая версия
+// брала его sed'ом по «"accessToken":"…"», и с Claude Code 2.1.27x это
+// сломалось: в той же записи связки появились OAuth MCP-серверов, у каждого
+// свой `accessToken` (пустой), а жадный `.*` брал последний — пустой.
+// Запрос падал «токен не найден», и полоса неделю показывала вчерашние
+// цифры без пятичасового окна.
 static const char *FETCH_SCRIPT =
     "tok=$(security find-generic-password -s \"Claude Code-credentials\" -w 2>>\"$BERTH_USAGE_LOG\""
-    " | sed -n 's/.*\"accessToken\":\"\\([^\"]*\\)\".*/\\1/p');"
+    " | python3 -c 'import sys,json; print(json.load(sys.stdin)[\"claudeAiOauth\"][\"accessToken\"])' 2>>\"$BERTH_USAGE_LOG\");"
     " if [ -z \"$tok\" ]; then echo \"$(date +%H:%M:%S) токен Claude Code не найден в связке ключей\" >>\"$BERTH_USAGE_LOG\"; exit 1; fi;"
     " curl -sS -f -m 20 -H \"Authorization: Bearer $tok\" -H \"anthropic-beta: oauth-2025-04-20\""
     " -H \"User-Agent: berth\" https://api.anthropic.com/api/oauth/usage"

@@ -172,6 +172,16 @@ typedef struct {
     bool  compacting;                 // на экране «Compacting conversation»
     double compact_seen;              // когда строка сжатия видна в последний раз
 
+    // Граница сжатия в jsonl: последняя известная и признак «появилась
+    // новая». Первая увиденная только запоминается — иначе после перезапуска
+    // берта журнал собирался бы у всех давно сжатых разговоров разом.
+    time_t compact_last;
+    bool   compact_tracked;
+    bool   compact_pending;
+    // У задачи-вкладки «журнал», запущенной после сжатия: по её успешному
+    // концу запустить «сводку» — сводке нужен уже дописанный журнал.
+    bool   chain_summary;
+
     char name[SESSION_NAME_MAX];    // имя проекта — его показываем в панели
     char cwd[SESSION_PATH_MAX];
     char group[SESSION_NAME_MAX];   // группа проектов; пустая — без группы
